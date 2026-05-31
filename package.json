@@ -1,0 +1,50 @@
+{
+  "name": "remicode-api",
+  "version": "1.0.0",
+  "description": "Discord bot with an accompanying web application",
+  "main": "index.js",
+  "author": "faite",
+  "scripts": {
+    "start": "pnpm run dev",
+    "dev": "nodemon index.js",
+    "lint": "eslint src/",
+    "create-admin-local": "node scripts/create-admin-local.js"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.2.1",
+    "adm-zip": "^0.5.16",
+    "axios": "^1.6.7",
+    "bcryptjs": "^3.0.3",
+    "body-parser": "^1.20.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.18.3",
+    "express-rate-limit": "^8.2.1",
+    "form-data": "^4.0.5",
+    "fs": "0.0.1-security",
+    "helmet": "^8.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "mime-types": "^2.1.35",
+    "multer": "^2.0.2",
+    "node-cron": "^4.2.1",
+    "nodemailer": "^7.0.12",
+    "otplib": "^13.4.0",
+    "path": "^0.12.7",
+    "qrcode": "^1.5.4",
+    "sdk-node-apis-efi": "^1.2.25",
+    "sharp": "^0.34.5",
+    "speakeasy": "^2.0.0",
+    "wio.db": "^4.0.22",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@babel/plugin-transform-runtime": "^7.27.1",
+    "eslint": "^8.57.1",
+    "nodemon": "^2.0.22",
+    "prisma": "^6.2.1"
+  },
+  "prisma": {
+    "seed": "node prisma/seed.js"
+  }
+}

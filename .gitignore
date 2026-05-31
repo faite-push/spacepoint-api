@@ -1,0 +1,46 @@
+# Dependências
+node_modules/
+
+# Variáveis de ambiente
+.env
+.env.*
+!.env.example
+
+# Certificados e chaves privadas
+src/certs/
+
+# Uploads de usuários (não devem ir ao repositório)
+uploads/
+temp_uploads/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs/
+*.log
+
+# Builds/outputs
+dist/
+build/
+
+# Prisma (migrations geradas localmente podem ser incluídas, mas não o client gerado)
+node_modules/.prisma/
+
+# Arquivos compactados de backup
+*.rar
+*.zip
+*.tar.gz
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# Editor/IDE
+.vscode/
+.idea/
+
+# Temporários
+*.tmp
+*.temp
