@@ -250,6 +250,44 @@ class CouponController {
       return res.status(500).json({ error: 'Erro interno do servidor' });
     }
   }
+
+  async validate(req, res) {
+    try {
+      const { code } = req.query;
+      if (!code) return res.status(400).json({ error: 'Código de cupom não informado' });
+
+      const coupon = await prisma.coupon.findUnique({
+        where: { code: code.toUpperCase() },
+        include: { references: true }
+      });
+
+      if (!coupon) {
+        return res.status(404).json({ error: 'Cupom não encontrado' });
+      }
+
+      if (!coupon.isActive) {
+        return res.status(400).json({ error: 'Este cupom não está mais ativo' });
+      }
+
+      const now = new Date();
+      if (coupon.startDate && new Date(coupon.startDate) > now) {
+        return res.status(400).json({ error: 'Este cupom ainda não é válido' });
+      }
+
+      if (coupon.endDate && new Date(coupon.endDate) < now) {
+        return res.status(400).json({ error: 'Este cupom expirou' });
+      }
+
+      if (coupon.maxUses && coupon.usedCount >= coupon.maxUses) {
+        return res.status(400).json({ error: 'Este cupom atingiu o limite de usos' });
+      }
+
+      return res.json({ coupon });
+    } catch (err) {
+      console.error('[COUPONS] Validate error:', err);
+      return res.status(500).json({ error: 'Erro ao validar cupom' });
+    }
+  }
 }
 
 module.exports = new CouponController();

@@ -15,6 +15,7 @@ function mapVariantForStore(v) {
     productId: v.productId,
     sku: v.sku || null,
     name: v.name,
+    description: v.description,
     price: priceToCents(v.price),
     comparePrice: v.comparePrice != null ? priceToCents(v.comparePrice) : null,
     imageUrl: v.imageUrl || null,

@@ -5,6 +5,8 @@ const couponController = require('../controllers/coupon.controllers');
 const requireAdmin = require('../middleware/adminMiddleware');
 const authenticate = require('../middleware/authMiddleware');
 
+router.get('/v2/api/coupons/validate', couponController.validate);
+
 router.use('/v2/api/admin/coupons', authenticate, requireAdmin);
 
 router.get('/v2/api/admin/coupons', couponController.list);
