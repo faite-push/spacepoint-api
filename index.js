@@ -8,6 +8,7 @@ const fs = require("fs");
 const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
 
 const app = express();
+app.set('trust proxy', 1);
 
 require("dotenv").config();
 
@@ -25,9 +26,7 @@ process.on("unhandledRejection", (reason) => {
   }
 });
 
-const allowedOrigins = [
-  process.env.FRONTEND_URL,
-].filter(Boolean);
+const allowedOrigins = [process.env.FRONTEND_URL,].filter(Boolean);
 
 app.use(cors({
   origin: function (origin, callback) {
@@ -40,7 +39,7 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'X-Requested-With'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'X-Requested-With', 'idempotency-key'],
   exposedHeaders: ['Set-Cookie'],
 }));
 

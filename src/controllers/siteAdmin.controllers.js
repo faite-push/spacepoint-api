@@ -180,12 +180,15 @@ class SiteAdminController {
         'page404Title', 'page404ButtonLabel', 'page404ButtonHref',
         'homeReviewsBadgeLabel', 'homeReviewsTitle', 'homeReviewsGoogleMapsUrl',
         'homeReviewsLinkLabel',
+        'homeShowcaseTitle', 'homeShowcaseSubtitle',
+        'popupTitle', 'popupDescription', 'popupImageUrl', 'popupCtaLabel', 'popupCtaLink',
         'socialFacebook', 'socialInstagram', 'socialTwitter', 'socialLinkedin', 'socialYoutube',
       ];
 
       const booleanFields = [
         'footerNewsletterEnabled', 'footerShowNoise', 'topBarEnabled', 'topBarDismissible',
         'maintenanceModeEnabled', 'homeReviewsEnabled',
+        'homeShowcaseEnabled', 'popupEnabled',
       ];
       for (const field of booleanFields) {
         if (body[field] !== undefined) {
@@ -236,6 +239,22 @@ class SiteAdminController {
               platform: sanitizeString(l.platform, 50),
               url: sanitizeString(l.url, 500),
             })).filter(l => l.platform && l.url)
+          : null;
+      }
+
+      if (body.popupTrigger !== undefined) {
+        const trigger = sanitizeString(body.popupTrigger, 20);
+        data.popupTrigger = ['entry', 'exit', 'delay'].includes(trigger) ? trigger : 'entry';
+      }
+
+      if (body.popupDelay !== undefined) {
+        const n = parseInt(body.popupDelay, 10);
+        data.popupDelay = Number.isFinite(n) ? Math.min(Math.max(n, 1), 300) : 5;
+      }
+
+      if (body.popupDescription !== undefined) {
+        data.popupDescription = body.popupDescription
+          ? sanitizeString(body.popupDescription, 2000)
           : null;
       }
 

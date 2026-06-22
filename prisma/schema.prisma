@@ -65,6 +65,8 @@ enum DeliveryType {
   file
   manual_chat
   mixed
+  manual
+  automatic_text
 }
 
 model Product {
@@ -163,7 +165,8 @@ model ProductCode {
   code        String          @unique
   status      String          @default("AVAILABLE")
   deliveredAt DateTime?
-  orderItemId String?         @unique
+  orderItemId String?
+
   createdAt   DateTime        @default(now())
   product     Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
   variant     ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
@@ -174,14 +177,18 @@ model ProductCode {
 }
 
 model Order {
-  id             String      @id @default(cuid())
-  userId         String
-  status         String      @default("PENDING")
-  total          Int
-  idempotencyKey String?     @unique
-  createdAt      DateTime    @default(now())
-  updatedAt      DateTime    @updatedAt
-  paidAt         DateTime?
+  id               String      @id @default(cuid())
+  userId           String
+  status           String      @default("PENDING")
+  subtotal         Int         @default(0)
+  discount         Int         @default(0)
+  total            Int
+  idempotencyKey   String?     @unique
+  paymentExpiresAt DateTime?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+  paidAt           DateTime?
+  adminNotes       String?     @db.Text
   user           User        @relation(fields: [userId], references: [id], onDelete: Restrict)
   items          OrderItem[]
   payments       Payment[]
@@ -192,13 +199,14 @@ model Order {
 }
 
 model OrderItem {
-  id          String          @id @default(cuid())
-  orderId     String
-  productId   String
-  variantId   String?
-  variantName String?
-  quantity    Int
-  unitPrice   Int
+  id            String          @id @default(cuid())
+  orderId       String
+  productId     String
+  variantId     String?
+  variantName   String?
+  quantity      Int
+  unitPrice     Int
+  stockReserved Int             @default(0)
   order       Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
   product     Product         @relation(fields: [productId], references: [id], onDelete: Restrict)
   variant     ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
@@ -271,6 +279,17 @@ model SiteConfig {
   homeReviewsTotalCount        Int?
   homeReviewsGoogleMapsUrl     String?
   homeReviewsLinkLabel         String?
+  homeShowcaseEnabled          Boolean  @default(false)
+  homeShowcaseTitle            String?
+  homeShowcaseSubtitle         String?
+  popupEnabled                 Boolean  @default(false)
+  popupTitle                   String?
+  popupDescription             String?  @db.Text
+  popupImageUrl                String?
+  popupCtaLabel                String?
+  popupCtaLink                 String?
+  popupTrigger                 String?  @default("entry")
+  popupDelay                   Int      @default(5)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 }
@@ -317,11 +336,12 @@ model Payment {
   id          String   @id @default(cuid())
   userId      String?
   orderId     String?
-  amount      Int // valor na mesma unidade do saldo interno (ou centavos — manter consistente)
+  amount      Int // centavos
   status      String // PAID | PENDING | CANCELLED | REFUNDED
   provider    String?
   externalId  String?  @unique
   description String?
+  metadata    Json?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -440,4 +460,16 @@ model CouponReference {
 
   @@index([couponId])
   @@index([type, referenceId])
+}
+
+model GatewayConfig {
+  id        String   @id @default(cuid())
+  slug      String   @unique // ex: "mercado-pago", "stripe"
+  name      String
+  config    Json     // credenciais e chaves
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([slug])
 }

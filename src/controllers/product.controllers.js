@@ -4,7 +4,10 @@ const {
   visibleVariantWhere,
   mapProductForStore,
   mapVariantForStore,
+  mapProductsForStore,
+  buildStoreStockMap,
 } = require('../utils/productStore');
+const { ensureDigitalStockSynced } = require('../utils/digitalStock');
 
 class ProductController {
   async list(req, res) {
@@ -44,7 +47,7 @@ class ProductController {
       });
 
       return res.json({
-        products: products.map((p) => mapProductForStore(p, p.variants)),
+        products: await mapProductsForStore(prisma, products),
       });
     } catch (err) {
       console.error('[Product.list]', err);
@@ -68,9 +71,11 @@ class ProductController {
 
       if (!product) return res.status(404).json({ error: 'Produto não encontrado' });
 
+      const stockByKey = await buildStoreStockMap(prisma, [product]);
+
       return res.json({
         product: {
-          ...mapProductForStore(product, product.variants),
+          ...mapProductForStore(product, product.variants, stockByKey),
           category: product.category,
         },
       });
@@ -96,7 +101,12 @@ class ProductController {
 
       if (!variant) return res.status(404).json({ error: 'Variante não encontrada' });
 
-      return res.json({ variant: mapVariantForStore(variant) });
+      let availableCount = null;
+      if (variant.deliveryType === 'automatic_lines') {
+        availableCount = await ensureDigitalStockSynced(prisma, variant);
+      }
+
+      return res.json({ variant: mapVariantForStore(variant, availableCount) });
     } catch (err) {
       console.error('[Product.getVariant]', err);
       return res.status(500).json({ error: 'Erro ao buscar variante' });

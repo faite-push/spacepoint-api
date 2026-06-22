@@ -1,7 +1,8 @@
 const { prisma } = require('../config/prisma');
 const { sanitizeString, sanitizeSlug } = require('../utils/sanitize');
+const { syncDigitalStock } = require('../utils/digitalStock');
 
-const DELIVERY_TYPES = ['automatic_lines', 'file', 'manual_chat', 'mixed'];
+const DELIVERY_TYPES = ['automatic_lines', 'file', 'manual_chat', 'mixed', 'manual', 'automatic_text'];
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -146,40 +147,58 @@ class ProductAdminController {
         ? req.body.deliveryType
         : 'automatic_lines';
 
-      const created = await prisma.product.create({
-        data: {
-          name,
-          slug,
-          description: sanitizeJson(req.body?.description),
-          price,
-          comparePrice: toDecimalOrNull(req.body?.comparePrice),
-          imageUrl: req.body?.imageUrl ? sanitizeString(req.body.imageUrl, 500) : null,
-          gallery: sanitizeStringArray(req.body?.gallery, 20),
-          stockQuantity: clampInt(req.body?.stockQuantity, 0, 0),
-          minPurchaseQuantity: clampInt(req.body?.minPurchaseQuantity, 1, 1),
-          maxPurchaseQuantity:
-            req.body?.maxPurchaseQuantity === null || req.body?.maxPurchaseQuantity === undefined
-              ? null
-              : clampInt(req.body.maxPurchaseQuantity, 1, 1),
-          onePurchasePerUser: Boolean(req.body?.onePurchasePerUser),
-          isVisible: req.body?.isVisible !== undefined ? Boolean(req.body.isVisible) : true,
-          isActive: req.body?.isActive !== undefined ? Boolean(req.body.isActive) : true,
-          featured: Boolean(req.body?.featured),
-          categoryId: categoryId || null,
-          deliveryType,
-          digitalLines: sanitizeStringArray(req.body?.digitalLines, 5000, 2000),
-          digitalFileUrl: req.body?.digitalFileUrl
-            ? sanitizeString(req.body.digitalFileUrl, 500)
-            : null,
-          manualDeliveryNote: req.body?.manualDeliveryNote
-            ? sanitizeString(req.body.manualDeliveryNote, 2000)
-            : null,
-          postPurchaseInstructions: sanitizeJson(req.body?.postPurchaseInstructions),
-          platform: req.body?.platform ? sanitizeString(req.body.platform, 40) : null,
-        },
-        include: {
-          category: { select: { id: true, name: true, slug: true } },
-        },
+      const created = await prisma.$transaction(async (tx) => {
+        const product = await tx.product.create({
+          data: {
+            name,
+            slug,
+            description: sanitizeJson(req.body?.description),
+            price,
+            comparePrice: toDecimalOrNull(req.body?.comparePrice),
+            imageUrl: req.body?.imageUrl ? sanitizeString(req.body.imageUrl, 500) : null,
+            gallery: sanitizeStringArray(req.body?.gallery, 20),
+            stockQuantity: clampInt(req.body?.stockQuantity, 0, 0),
+            minPurchaseQuantity: clampInt(req.body?.minPurchaseQuantity, 1, 1),
+            maxPurchaseQuantity:
+              req.body?.maxPurchaseQuantity === null || req.body?.maxPurchaseQuantity === undefined
+                ? null
+                : clampInt(req.body.maxPurchaseQuantity, 1, 1),
+            onePurchasePerUser: Boolean(req.body?.onePurchasePerUser),
+            isVisible: req.body?.isVisible !== undefined ? Boolean(req.body.isVisible) : true,
+            isActive: req.body?.isActive !== undefined ? Boolean(req.body.isActive) : true,
+            featured: Boolean(req.body?.featured),
+            categoryId: categoryId || null,
+            deliveryType,
+            digitalLines: sanitizeStringArray(req.body?.digitalLines, 5000, 2000),
+            digitalFileUrl: req.body?.digitalFileUrl
+              ? sanitizeString(req.body.digitalFileUrl, 500)
+              : null,
+            manualDeliveryNote: req.body?.manualDeliveryNote
+              ? sanitizeString(req.body.manualDeliveryNote, 2000)
+              : null,
+            postPurchaseInstructions: sanitizeJson(req.body?.postPurchaseInstructions),
+            platform: req.body?.platform ? sanitizeString(req.body.platform, 40) : null,
+          },
+          include: {
+            category: { select: { id: true, name: true, slug: true } },
+          },
+        });
+
+        if (product.deliveryType === 'automatic_lines') {
+          const { availableCount } = await syncDigitalStock(tx, {
+            productId: product.id,
+            digitalLines: product.digitalLines ?? [],
+          });
+          return tx.product.update({
+            where: { id: product.id },
+            data: { stockQuantity: availableCount },
+            include: {
+              category: { select: { id: true, name: true, slug: true } },
+            },
+          });
+        }
+
+        return product;
       });
       return res.status(201).json(created);
     } catch (err) {
@@ -280,12 +299,31 @@ class ProductAdminController {
         data.platform = req.body.platform ? sanitizeString(req.body.platform, 40) : null;
       }
 
-      const updated = await prisma.product.update({
-        where: { id },
-        data,
-        include: {
-          category: { select: { id: true, name: true, slug: true } },
-        },
+      const updated = await prisma.$transaction(async (tx) => {
+        const product = await tx.product.update({
+          where: { id },
+          data,
+          include: {
+            category: { select: { id: true, name: true, slug: true } },
+          },
+        });
+
+        const variantCount = await tx.productVariant.count({ where: { productId: id } });
+        if (variantCount === 0 && product.deliveryType === 'automatic_lines') {
+          const { availableCount } = await syncDigitalStock(tx, {
+            productId: product.id,
+            digitalLines: product.digitalLines ?? [],
+          });
+          return tx.product.update({
+            where: { id: product.id },
+            data: { stockQuantity: availableCount },
+            include: {
+              category: { select: { id: true, name: true, slug: true } },
+            },
+          });
+        }
+
+        return product;
       });
       return res.json(updated);
     } catch (err) {
@@ -407,6 +445,18 @@ class ProductAdminController {
           where: { productId: sourceId },
           data: { productId: targetProductId, variantId: created.id },
         });
+
+        if (created.deliveryType === 'automatic_lines') {
+          const { availableCount } = await syncDigitalStock(tx, {
+            productId: targetProductId,
+            variantId: created.id,
+            digitalLines: created.digitalLines ?? [],
+          });
+          await tx.productVariant.update({
+            where: { id: created.id },
+            data: { stockQuantity: availableCount },
+          });
+        }
 
         await tx.product.delete({ where: { id: sourceId } });
 

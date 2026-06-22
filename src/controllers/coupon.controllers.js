@@ -30,16 +30,26 @@ class CouponController {
 
   async stats(req, res) {
     try {
-      const { period = 'all' } = req.query;
+      const { period = 'all', from, to } = req.query;
       
       let dateFilter = {};
       const now = new Date();
-      if (period === 'today') {
-        dateFilter = { createdAt: { gte: new Date(now.setHours(0,0,0,0)) } };
-      } else if (period === '7days') {
-        dateFilter = { createdAt: { gte: new Date(now.setDate(now.getDate() - 7)) } };
-      } else if (period === '30days') {
-        dateFilter = { createdAt: { gte: new Date(now.setDate(now.getDate() - 30)) } };
+
+      if (from || to) {
+        dateFilter = {
+          createdAt: {
+            ...(from ? { gte: new Date(from) } : {}),
+            ...(to ? { lte: new Date(to) } : {}),
+          }
+        };
+      } else {
+        if (period === 'today') {
+          dateFilter = { createdAt: { gte: new Date(now.setHours(0,0,0,0)) } };
+        } else if (period === '7days') {
+          dateFilter = { createdAt: { gte: new Date(now.setDate(now.getDate() - 7)) } };
+        } else if (period === '30days') {
+          dateFilter = { createdAt: { gte: new Date(now.setDate(now.getDate() - 30)) } };
+        }
       }
 
       const totalUses = await prisma.couponUsage.count({ where: dateFilter });

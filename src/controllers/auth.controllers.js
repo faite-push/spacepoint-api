@@ -8,9 +8,9 @@ const crypto = require('crypto');
 const isProduction = process.env.NODE_ENV === 'production';
 const COOKIE_BASE = {
   httpOnly: true,
-  secure: false, // Must be false for localhost http
-  sameSite: 'lax', // 'lax' works for same-site different ports in development
-  domain: undefined, // No domain restriction
+  secure: process.env.NODE_ENV === 'production' || process.env.COOKIE_SAME_SITE === 'none',
+  sameSite: process.env.COOKIE_SAME_SITE || (process.env.NODE_ENV === 'production' ? 'none' : 'lax'),
+  domain: process.env.COOKIE_DOMAIN || undefined,
   maxAge: 7 * 24 * 60 * 60 * 1000,
   path: '/',
 };
@@ -151,6 +151,7 @@ class AuthController {
           image: true,
           provider: true,
           isAdmin: true,
+          balance: true,
           createdAt: true,
           role: {
             include: {

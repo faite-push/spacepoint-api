@@ -85,20 +85,17 @@ class CdnController {
       let imageProcessor = sharp(req.file.path);
 
       if (type === 'banner') {
-        // Banners require very high width and premium quality
         imageProcessor = imageProcessor
-          .resize(2560, 1080, { fit: 'inside', withoutEnlargement: true })
-          .webp({ quality: 95 });
+          .resize(3840, 2160, { fit: 'inside', withoutEnlargement: true })
+          .webp({ quality: 100 });
       } else if (type === 'product') {
-        // Products require high quality but smaller footprint
         imageProcessor = imageProcessor
-          .resize(1080, 1080, { fit: 'inside', withoutEnlargement: true })
-          .webp({ quality: 90 });
+          .resize(2048, 2048, { fit: 'inside', withoutEnlargement: true })
+          .webp({ quality: 100 });
       } else {
-        // Default avatar/general behavior
         imageProcessor = imageProcessor
-          .resize(800, 800, { fit: 'inside', withoutEnlargement: true })
-          .webp({ quality: 80 });
+          .resize(2048, 2048, { fit: 'inside', withoutEnlargement: true })
+          .webp({ quality: 100 });
       }
 
       await imageProcessor.toFile(finalPath);
@@ -163,6 +160,58 @@ class CdnController {
         console.error(`Erro ao deletar arquivo interno ${filename}:`, err);
       }
       return false;
+    }
+  }
+
+  async listMedia(req, res) {
+    try {
+      const { search, page = 1, pageSize = 60 } = req.query;
+      const files = await fs.readdir(UPLOAD_DIR);
+      
+      let mediaItems = [];
+      for (const filename of files) {
+        if (filename.startsWith('.') || !filename.endsWith('.webp')) continue;
+        
+        const filePath = path.join(UPLOAD_DIR, filename);
+        const stat = await fs.stat(filePath).catch(() => null);
+        if (!stat) continue;
+
+        mediaItems.push({
+          id: filename, // Usamos o filename como ID já que não temos tabela no banco
+          url: `${req.protocol}://${req.get('host')}/cdn/${filename}`,
+          filename: filename,
+          size: stat.size,
+          type: 'image/webp',
+          createdAt: stat.birthtime,
+          updatedAt: stat.mtime,
+        });
+      }
+
+      // Ordenar por data de criação (mais recentes primeiro)
+      mediaItems.sort((a, b) => b.createdAt - a.createdAt);
+
+      // Busca simples no nome do arquivo
+      if (search) {
+        const q = search.toLowerCase();
+        mediaItems = mediaItems.filter(item => item.filename.toLowerCase().includes(q));
+      }
+
+      const total = mediaItems.length;
+      const totalPages = Math.ceil(total / pageSize);
+      const paginatedItems = mediaItems.slice((page - 1) * pageSize, page * pageSize);
+
+      res.json({
+        items: paginatedItems,
+        pagination: {
+          page: parseInt(page),
+          pageSize: parseInt(pageSize),
+          total,
+          totalPages,
+        }
+      });
+    } catch (err) {
+      console.error('Erro ao listar mídia:', err);
+      res.status(500).json({ error: 'Erro ao listar arquivos da galeria' });
     }
   }
 };

@@ -13,4 +13,8 @@ router.get('/cdn/:filename', CdnController.getFile);
 router.post('/v1/cdn/upload', authenticate, requireAdmin, upload.single('file'), CdnController.uploadFile);
 router.delete('/v1/cdn/:filename', authenticate, requireAdmin, CdnController.deleteFile);
 
+// Admin Gallery Endpoints
+router.get('/v2/api/admin/media', authenticate, requireAdmin, CdnController.listMedia);
+router.delete('/v2/api/admin/media/:filename', authenticate, requireAdmin, CdnController.deleteFile);
+
 module.exports = router;

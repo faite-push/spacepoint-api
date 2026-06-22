@@ -30,7 +30,7 @@ class SiteController {
   }
 
   async getHome(req, res) {
-    const { mapProductForStore, visibleVariantWhere } = require('../utils/productStore');
+    const { mapProductsForStore, visibleVariantWhere } = require('../utils/productStore');
     const featuredRows = await prisma.product.findMany({
       where: { isActive: true, isVisible: true, featured: true },
       orderBy: { createdAt: 'desc' },
@@ -39,7 +39,7 @@ class SiteController {
         variants: { where: visibleVariantWhere(), orderBy: { sortOrder: 'asc' } },
       },
     });
-    const featured = featuredRows.map((p) => mapProductForStore(p, p.variants));
+    const featured = await mapProductsForStore(prisma, featuredRows);
 
     const banners = await prisma.banner.findMany({
       where: { isActive: true },

@@ -1,3 +1,10 @@
+const {
+  ensureDigitalStockSynced,
+  getAvailableStockCount,
+  resolveDisplayStock,
+  validateStockQuantity,
+} = require('./digitalStock');
+
 /** Converte preço Decimal/string/number (BRL) para centavos inteiros */
 function priceToCents(value) {
   const n = Number(value);
@@ -9,7 +16,7 @@ function visibleVariantWhere() {
   return { isActive: true, isVisible: true };
 }
 
-function mapVariantForStore(v) {
+function mapVariantForStore(v, availableCodeCount = null) {
   return {
     id: v.id,
     productId: v.productId,
@@ -19,7 +26,7 @@ function mapVariantForStore(v) {
     price: priceToCents(v.price),
     comparePrice: v.comparePrice != null ? priceToCents(v.comparePrice) : null,
     imageUrl: v.imageUrl || null,
-    stockQuantity: v.stockQuantity ?? 0,
+    stockQuantity: resolveDisplayStock(v, availableCodeCount),
     minPurchaseQuantity: v.minPurchaseQuantity ?? 1,
     maxPurchaseQuantity: v.maxPurchaseQuantity,
     onePurchasePerUser: v.onePurchasePerUser ?? false,
@@ -28,8 +35,10 @@ function mapVariantForStore(v) {
   };
 }
 
-function mapProductForStore(product, variants = []) {
-  const visibleVariants = variants.map(mapVariantForStore);
+function mapProductForStore(product, variants = [], stockByKey = new Map()) {
+  const visibleVariants = variants.map((v) =>
+    mapVariantForStore(v, stockByKey.get(`variant:${v.id}`) ?? null)
+  );
   const hasVariants = visibleVariants.length > 0;
   const prices = hasVariants
     ? visibleVariants.map((v) => v.price)
@@ -57,18 +66,69 @@ function mapProductForStore(product, variants = []) {
     platform: product.platform || "Digital",
     isDigital: product.isDigital !== false,
     featured: product.featured ?? false,
-    stockQuantity: product.stockQuantity ?? 0,
+    stockQuantity: hasVariants
+      ? visibleVariants.reduce((sum, v) => sum + (v.stockQuantity ?? 0), 0)
+      : resolveDisplayStock(product, stockByKey.get(`product:${product.id}`) ?? null),
     variants: visibleVariants,
   };
+}
+
+async function buildStoreStockMap(tx, products) {
+  const stockByKey = new Map();
+
+  for (const product of products) {
+    const variants = product.variants || [];
+    if (variants.length > 0) {
+      for (const variant of variants) {
+        if (variant.deliveryType === 'automatic_lines') {
+          const count = await ensureDigitalStockSynced(tx, variant);
+          stockByKey.set(`variant:${variant.id}`, count);
+        }
+      }
+    } else if (product.deliveryType === 'automatic_lines') {
+      const count = await ensureDigitalStockSynced(tx, product);
+      stockByKey.set(`product:${product.id}`, count);
+    }
+  }
+
+  return stockByKey;
+}
+
+async function mapProductsForStore(tx, products) {
+  const stockByKey = await buildStoreStockMap(tx, products);
+  return products.map((p) => mapProductForStore(p, p.variants || [], stockByKey));
 }
 
 /**
  * Resolve unidade vendável (produto simples ou variante).
  * @returns {{ product, variant, unitPriceCents, variantName, requiresVariant }}
  */
-async function resolveSellable(tx, productId, variantId) {
+async function assertOnePurchasePerUser(tx, userId, product, variant) {
+  const entity = variant || product;
+  if (!entity?.onePurchasePerUser) return;
+
+  const existing = await tx.order.findFirst({
+    where: {
+      userId,
+      status: { in: ['PENDING', 'PAID', 'DELIVERED'] },
+      items: {
+        some: {
+          productId: product.id,
+          ...(variant ? { variantId: variant.id } : { variantId: null }),
+        },
+      },
+    },
+    select: { id: true },
+  });
+
+  if (existing) {
+    throw new Error('Você já possui uma compra deste produto');
+  }
+}
+
+async function resolveSellable(tx, productId, variantId, quantity = 1, userId = null) {
   const product = await tx.product.findFirst({
-    where: { id: productId, isActive: true, isVisible: true },
+    where: { id: productId, isActive: true },
     include: {
       variants: {
         where: visibleVariantWhere(),
@@ -89,15 +149,14 @@ async function resolveSellable(tx, productId, variantId) {
     const variant = visibleVariants.find((v) => v.id === variantId);
     if (!variant) throw new Error('Variante indisponível');
 
-    if (variant.stockQuantity <= 0 && variant.deliveryType === 'automatic_lines') {
-      const codeCount = await tx.productCode.count({
-        where: {
-          status: 'AVAILABLE',
-          OR: [{ variantId: variant.id }, { productId: product.id, variantId: null }],
-        },
-      });
-      if (codeCount < 1) throw new Error('Variante sem estoque');
-    }
+    if (userId) await assertOnePurchasePerUser(tx, userId, product, variant);
+
+    await ensureDigitalStockSynced(tx, variant);
+    const codeCount =
+      variant.deliveryType === 'automatic_lines'
+        ? await getAvailableStockCount(tx, productId, variant.id)
+        : null;
+    validateStockQuantity(variant, quantity, codeCount ?? 0);
 
     return {
       product,
@@ -108,7 +167,16 @@ async function resolveSellable(tx, productId, variantId) {
     };
   }
 
-  if (variantId) throw new Error('Este produto não possui variantes');
+  if (variantId) throw new Error('Este produto não possui a variante selecionada');
+
+  if (userId) await assertOnePurchasePerUser(tx, userId, product, null);
+
+  await ensureDigitalStockSynced(tx, product);
+  const codeCount =
+    product.deliveryType === 'automatic_lines'
+      ? await getAvailableStockCount(tx, product.id, null)
+      : null;
+  validateStockQuantity(product, quantity, codeCount ?? 0);
 
   return {
     product,
@@ -124,5 +192,7 @@ module.exports = {
   visibleVariantWhere,
   mapVariantForStore,
   mapProductForStore,
+  mapProductsForStore,
+  buildStoreStockMap,
   resolveSellable,
 };

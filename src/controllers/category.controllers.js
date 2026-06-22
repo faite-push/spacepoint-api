@@ -1,6 +1,6 @@
 const { prisma } = require('../config/prisma');
 const { sanitizeString, sanitizeSlug } = require('../utils/sanitize');
-const { mapProductForStore, visibleVariantWhere } = require('../utils/productStore');
+const { mapProductsForStore, visibleVariantWhere } = require('../utils/productStore');
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -156,7 +156,7 @@ class CategoryController {
             bannerUrl: s.bannerUrl,
             productCount: s._count.products,
           })),
-          products: products.map((p) => mapProductForStore(p, p.variants)),
+          products: await mapProductsForStore(prisma, products),
         },
       });
     } catch (err) {

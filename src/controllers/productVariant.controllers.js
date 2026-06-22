@@ -1,5 +1,9 @@
 const { prisma } = require('../config/prisma');
 const { sanitizeString } = require('../utils/sanitize');
+const {
+  syncDigitalStock,
+  ensureDigitalStockSynced,
+} = require('../utils/digitalStock');
 
 function parseDecimal(v) {
   if (v === undefined || v === null || v === "") return null;
@@ -48,7 +52,16 @@ const ProductVariantController = {
         where: { productId },
         orderBy: { sortOrder: "asc" },
       });
-      return res.json({ variants });
+
+      const enriched = await Promise.all(
+        variants.map(async (variant) => {
+          if (variant.deliveryType !== 'automatic_lines') return variant;
+          const availableCount = await ensureDigitalStockSynced(prisma, variant);
+          return { ...variant, stockQuantity: availableCount };
+        })
+      );
+
+      return res.json({ variants: enriched });
     } catch (err) {
       console.error("[ProductVariant.list]", err);
       return res.status(500).json({ error: "Erro ao listar variantes" });
@@ -83,7 +96,24 @@ const ProductVariantController = {
       const data = buildData(req.body, productId);
       if (data.sortOrder === undefined) data.sortOrder = count;
 
-      const variant = await prisma.productVariant.create({ data });
+      const variant = await prisma.$transaction(async (tx) => {
+        const created = await tx.productVariant.create({ data });
+
+        if (created.deliveryType === 'automatic_lines') {
+          const { availableCount } = await syncDigitalStock(tx, {
+            productId,
+            variantId: created.id,
+            digitalLines: created.digitalLines ?? [],
+          });
+          return tx.productVariant.update({
+            where: { id: created.id },
+            data: { stockQuantity: availableCount },
+          });
+        }
+
+        return created;
+      });
+
       return res.status(201).json(variant);
     } catch (err) {
       console.error("[ProductVariant.create]", err);
@@ -96,10 +126,27 @@ const ProductVariantController = {
       const { variantId } = req.params;
       const data = buildData(req.body, undefined);
 
-      const variant = await prisma.productVariant.update({
-        where: { id: variantId },
-        data,
+      const variant = await prisma.$transaction(async (tx) => {
+        const updated = await tx.productVariant.update({
+          where: { id: variantId },
+          data,
+        });
+
+        if (updated.deliveryType === 'automatic_lines') {
+          const { availableCount } = await syncDigitalStock(tx, {
+            productId: updated.productId,
+            variantId: updated.id,
+            digitalLines: updated.digitalLines ?? [],
+          });
+          return tx.productVariant.update({
+            where: { id: updated.id },
+            data: { stockQuantity: availableCount },
+          });
+        }
+
+        return updated;
       });
+
       return res.json(variant);
     } catch (err) {
       if (err.code === "P2025") {
@@ -151,29 +198,48 @@ const ProductVariantController = {
       if (!source) return res.status(404).json({ error: 'Variante não encontrada' });
 
       const count = await prisma.productVariant.count({ where: { productId } });
-      const variant = await prisma.productVariant.create({
-        data: {
-          productId,
-          sku: source.sku ? `${source.sku}-copia` : null,
-          name: `${source.name} (cópia)`,
-          description: source.description,
-          price: source.price,
-          comparePrice: source.comparePrice,
-          imageUrl: source.imageUrl,
-          gallery: source.gallery ?? [],
-          stockQuantity: source.stockQuantity,
-          minPurchaseQuantity: source.minPurchaseQuantity,
-          maxPurchaseQuantity: source.maxPurchaseQuantity,
-          onePurchasePerUser: source.onePurchasePerUser,
-          isVisible: source.isVisible,
-          isActive: source.isActive,
-          sortOrder: count,
-          deliveryType: source.deliveryType,
-          digitalLines: source.digitalLines ?? [],
-          digitalFileUrl: source.digitalFileUrl,
-          manualDeliveryNote: source.manualDeliveryNote,
-          postPurchaseInstructions: source.postPurchaseInstructions,
-        },
+      const variant = await prisma.$transaction(async (tx) => {
+        const created = await tx.productVariant.create({
+          data: {
+            productId,
+            sku: source.sku ? `${source.sku}-copia` : null,
+            name: `${source.name} (cópia)`,
+            description: source.description,
+            price: source.price,
+            comparePrice: source.comparePrice,
+            imageUrl: source.imageUrl,
+            gallery: source.gallery ?? [],
+            stockQuantity: 0,
+            minPurchaseQuantity: source.minPurchaseQuantity,
+            maxPurchaseQuantity: source.maxPurchaseQuantity,
+            onePurchasePerUser: source.onePurchasePerUser,
+            isVisible: source.isVisible,
+            isActive: source.isActive,
+            sortOrder: count,
+            deliveryType: source.deliveryType,
+            digitalLines: source.digitalLines ?? [],
+            digitalFileUrl: source.digitalFileUrl,
+            manualDeliveryNote: source.manualDeliveryNote,
+            postPurchaseInstructions: source.postPurchaseInstructions,
+          },
+        });
+
+        if (created.deliveryType === 'automatic_lines') {
+          const { availableCount } = await syncDigitalStock(tx, {
+            productId,
+            variantId: created.id,
+            digitalLines: created.digitalLines ?? [],
+          });
+          return tx.productVariant.update({
+            where: { id: created.id },
+            data: { stockQuantity: availableCount },
+          });
+        }
+
+        return tx.productVariant.update({
+          where: { id: created.id },
+          data: { stockQuantity: source.stockQuantity },
+        });
       });
 
       return res.status(201).json(variant);
