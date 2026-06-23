@@ -11,6 +11,7 @@
     "create-admin-local": "dotenv -e .env.local -- node scripts/create-admin-local.js"
   },
   "dependencies": {
+    "@babel/plugin-transform-runtime": "^7.27.1",
     "@prisma/client": "^6.2.1",
     "adm-zip": "^0.5.16",
     "axios": "^1.6.7",
@@ -19,6 +20,8 @@
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
+    "dotenv-cli": "^11.0.0",
+    "eslint": "^8.57.1",
     "express": "^4.18.3",
     "express-rate-limit": "^8.2.1",
     "form-data": "^4.0.5",
@@ -29,19 +32,16 @@
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
     "nodemailer": "^7.0.12",
+    "nodemon": "^2.0.22",
     "otplib": "^13.4.0",
     "path": "^0.12.7",
+    "prisma": "^6.2.1",
     "qrcode": "^1.5.4",
     "sdk-node-apis-efi": "^1.2.25",
     "sharp": "^0.34.5",
     "speakeasy": "^2.0.0",
     "wio.db": "^4.0.22",
-    "zod": "^3.24.1",
-    "@babel/plugin-transform-runtime": "^7.27.1",
-    "dotenv-cli": "^11.0.0",
-    "eslint": "^8.57.1",
-    "nodemon": "^2.0.22",
-    "prisma": "^6.2.1"
+    "zod": "^3.24.1"
   },
   "prisma": {
     "seed": "node prisma/seed.js"

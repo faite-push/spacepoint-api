@@ -26,21 +26,36 @@ process.on("unhandledRejection", (reason) => {
   }
 });
 
-const allowedOrigins = process.env.FRONTEND_URL;
+function parseAllowedOrigins() {
+  const raw = process.env.FRONTEND_URL || "";
+  const origins = raw.split(",").map((s) => s.trim()).filter(Boolean);
+
+  if (process.env.NODE_ENV !== "production") {
+    origins.push("http://localhost:3000", "http://127.0.0.1:3000");
+  }
+
+  return [...new Set(origins)];
+}
+
+const allowedOrigins = parseAllowedOrigins();
 
 app.use(cors({
-  origin: function (origin, callback) {
+  origin(origin, callback) {
     if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-    console.warn('[CORS] Blocked origin:', origin);
-    callback(new Error('Not allowed by CORS'));
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    console.warn("[CORS] Blocked origin:", origin);
+    callback(new Error("Not allowed by CORS"));
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'X-Requested-With', 'idempotency-key'],
-  exposedHeaders: ['Set-Cookie'],
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-CSRF-Token",
+    "X-Requested-With",
+    "Idempotency-Key",
+    "ngrok-skip-browser-warning",
+  ],
 }));
 
 app.use(helmet({
