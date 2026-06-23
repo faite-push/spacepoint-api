@@ -1,4 +1,6 @@
 const { prisma } = require('../config/prisma');
+const { resolveEntityMedia } = require('../utils/mediaUrl');
+const { normalizeCheckoutSettings } = require('../utils/checkoutConfig');
 
 class SiteController {
   async getConfig(req, res) {
@@ -8,7 +10,11 @@ class SiteController {
       create: { id: 'default' },
     });
 
-    return res.json(config);
+    const resolved = resolveEntityMedia(config, req);
+    return res.json({
+      ...resolved,
+      checkoutSettings: normalizeCheckoutSettings(config.checkoutSettings),
+    });
   }
 
   async getInstitutionalPage(req, res) {
@@ -39,14 +45,17 @@ class SiteController {
         variants: { where: visibleVariantWhere(), orderBy: { sortOrder: 'asc' } },
       },
     });
-    const featured = await mapProductsForStore(prisma, featuredRows);
+    const featured = await mapProductsForStore(prisma, featuredRows, req);
 
     const banners = await prisma.banner.findMany({
       where: { isActive: true },
       orderBy: { sortOrder: 'asc' },
     });
 
-    return res.json({ featured, banners });
+    return res.json({
+      featured,
+      banners: banners.map((banner) => resolveEntityMedia(banner, req)),
+    });
   }
 }
 

@@ -1,5 +1,6 @@
 const { prisma } = require('../config/prisma');
 const { sanitizeString } = require('../utils/sanitize');
+const { normalizeCheckoutSettings } = require('../utils/checkoutConfig');
 const { ensureDefaultPageSeo, ensureDefaultReviews } = require('./homeReview.controllers');
 
 const DEFAULT_INSTITUTIONAL_PAGES = [
@@ -156,7 +157,13 @@ class SiteAdminController {
         getOrCreateSiteConfig(),
         prisma.institutionalPage.findMany({ orderBy: { sortOrder: 'asc' } }),
       ]);
-      return res.json({ config, institutionalPages: pages });
+      return res.json({
+        config: {
+          ...config,
+          checkoutSettings: normalizeCheckoutSettings(config.checkoutSettings),
+        },
+        institutionalPages: pages,
+      });
     } catch (err) {
       console.error('[SiteAdmin.getSettings]', err);
       return res.status(500).json({ error: 'Erro ao carregar configurações do site' });
@@ -256,6 +263,10 @@ class SiteAdminController {
         data.popupDescription = body.popupDescription
           ? sanitizeString(body.popupDescription, 2000)
           : null;
+      }
+
+      if (body.checkoutSettings !== undefined) {
+        data.checkoutSettings = normalizeCheckoutSettings(body.checkoutSettings);
       }
 
       const config = await prisma.siteConfig.upsert({

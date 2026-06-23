@@ -1,14 +1,14 @@
 {
-  "name": "remicode-api",
+  "name": "spacepoint-api",
   "version": "1.0.0",
-  "description": "Discord bot with an accompanying web application",
+  "description": "Spacepoint API",
   "main": "index.js",
   "author": "faite",
   "scripts": {
-    "start": "pnpm run dev",
-    "dev": "nodemon index.js",
+    "dev": "dotenv -e .env.local -- nodemon index.js",
+    "start": "dotenv -e .env -- node index.js",
     "lint": "eslint src/",
-    "create-admin-local": "node scripts/create-admin-local.js"
+    "create-admin-local": "dotenv -e .env.local -- node scripts/create-admin-local.js"
   },
   "dependencies": {
     "@prisma/client": "^6.2.1",
@@ -40,6 +40,7 @@
   },
   "devDependencies": {
     "@babel/plugin-transform-runtime": "^7.27.1",
+    "dotenv-cli": "^11.0.0",
     "eslint": "^8.57.1",
     "nodemon": "^2.0.22",
     "prisma": "^6.2.1"

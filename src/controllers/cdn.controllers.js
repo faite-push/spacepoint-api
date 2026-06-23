@@ -4,6 +4,7 @@ const fs = require('fs').promises;
 const crypto = require('crypto');
 const { createReadStream } = require('fs');
 const sharp = require('sharp');
+const { buildCdnUrl } = require('../utils/mediaUrl');
 
 const UPLOAD_DIR = path.join(__dirname, '../', 'cdn');
 
@@ -102,7 +103,7 @@ class CdnController {
       
       await fs.unlink(req.file.path).catch(() => { });
 
-      const url = `${req.protocol}://${req.get('host')}/cdn/${filename}`;
+      const url = buildCdnUrl(filename, req);
       const stat = await fs.stat(finalPath);
 
       res.status(201).json({
@@ -178,7 +179,7 @@ class CdnController {
 
         mediaItems.push({
           id: filename, // Usamos o filename como ID já que não temos tabela no banco
-          url: `${req.protocol}://${req.get('host')}/cdn/${filename}`,
+          url: buildCdnUrl(filename, req),
           filename: filename,
           size: stat.size,
           type: 'image/webp',

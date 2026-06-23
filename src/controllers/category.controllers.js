@@ -1,6 +1,7 @@
 const { prisma } = require('../config/prisma');
 const { sanitizeString, sanitizeSlug } = require('../utils/sanitize');
 const { mapProductsForStore, visibleVariantWhere } = require('../utils/productStore');
+const { resolveEntityMedia } = require('../utils/mediaUrl');
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -87,7 +88,7 @@ class CategoryController {
           sortOrder: true,
         },
       });
-      return res.json({ categories: buildTree(rows) });
+      return res.json({ categories: buildTree(rows.map((row) => resolveEntityMedia(row, req))) });
     } catch (err) {
       console.error('[Category.listPublic]', err);
       return res.status(500).json({ error: 'Erro ao listar categorias' });
@@ -145,18 +146,18 @@ class CategoryController {
           id: category.id,
           name: category.name,
           slug: category.slug,
-          imageUrl: category.imageUrl,
-          bannerUrl: category.bannerUrl,
+          imageUrl: resolveEntityMedia({ imageUrl: category.imageUrl }, req).imageUrl,
+          bannerUrl: resolveEntityMedia({ bannerUrl: category.bannerUrl }, req).bannerUrl,
           parent,
           subcategories: subcategories.map((s) => ({
             id: s.id,
             name: s.name,
             slug: s.slug,
-            imageUrl: s.imageUrl,
-            bannerUrl: s.bannerUrl,
+            imageUrl: resolveEntityMedia({ imageUrl: s.imageUrl }, req).imageUrl,
+            bannerUrl: resolveEntityMedia({ bannerUrl: s.bannerUrl }, req).bannerUrl,
             productCount: s._count.products,
           })),
-          products: await mapProductsForStore(prisma, products),
+          products: await mapProductsForStore(prisma, products, req),
         },
       });
     } catch (err) {

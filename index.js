@@ -26,7 +26,7 @@ process.on("unhandledRejection", (reason) => {
   }
 });
 
-const allowedOrigins = [process.env.FRONTEND_URL,].filter(Boolean);
+const allowedOrigins = process.env.FRONTEND_URL;
 
 app.use(cors({
   origin: function (origin, callback) {

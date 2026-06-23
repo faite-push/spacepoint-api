@@ -4,6 +4,7 @@ const {
   resolveDisplayStock,
   validateStockQuantity,
 } = require('./digitalStock');
+const { resolveMediaUrl, resolveMediaUrls } = require('./mediaUrl');
 
 /** Converte preço Decimal/string/number (BRL) para centavos inteiros */
 function priceToCents(value) {
@@ -16,7 +17,7 @@ function visibleVariantWhere() {
   return { isActive: true, isVisible: true };
 }
 
-function mapVariantForStore(v, availableCodeCount = null) {
+function mapVariantForStore(v, availableCodeCount = null, req = null) {
   return {
     id: v.id,
     productId: v.productId,
@@ -25,7 +26,7 @@ function mapVariantForStore(v, availableCodeCount = null) {
     description: v.description,
     price: priceToCents(v.price),
     comparePrice: v.comparePrice != null ? priceToCents(v.comparePrice) : null,
-    imageUrl: v.imageUrl || null,
+    imageUrl: resolveMediaUrl(v.imageUrl || null, req),
     stockQuantity: resolveDisplayStock(v, availableCodeCount),
     minPurchaseQuantity: v.minPurchaseQuantity ?? 1,
     maxPurchaseQuantity: v.maxPurchaseQuantity,
@@ -35,9 +36,9 @@ function mapVariantForStore(v, availableCodeCount = null) {
   };
 }
 
-function mapProductForStore(product, variants = [], stockByKey = new Map()) {
+function mapProductForStore(product, variants = [], stockByKey = new Map(), req = null) {
   const visibleVariants = variants.map((v) =>
-    mapVariantForStore(v, stockByKey.get(`variant:${v.id}`) ?? null)
+    mapVariantForStore(v, stockByKey.get(`variant:${v.id}`) ?? null, req)
   );
   const hasVariants = visibleVariants.length > 0;
   const prices = hasVariants
@@ -45,11 +46,14 @@ function mapProductForStore(product, variants = [], stockByKey = new Map()) {
     : [priceToCents(product.price)];
 
   const minPrice = Math.min(...prices.filter((p) => p > 0));
-  const image =
+  const rawImage =
     product.imageUrl ||
     (Array.isArray(product.gallery) && product.gallery[0]) ||
     (Array.isArray(product.images) && product.images[0]) ||
     null;
+  const image = resolveMediaUrl(rawImage, req);
+  const gallery = resolveMediaUrls(product.gallery || [], req);
+  const legacyImages = resolveMediaUrls(product.images || [], req);
 
   return {
     id: product.id,
@@ -61,7 +65,7 @@ function mapProductForStore(product, variants = [], stockByKey = new Map()) {
     priceFrom: hasVariants,
     hasVariants,
     variantCount: visibleVariants.length,
-    images: image ? [image, ...(product.gallery || []).filter((u) => u !== image)] : product.images || [],
+    images: image ? [image, ...gallery.filter((u) => u !== image)] : legacyImages,
     imageUrl: image,
     platform: product.platform || "Digital",
     isDigital: product.isDigital !== false,
@@ -94,9 +98,9 @@ async function buildStoreStockMap(tx, products) {
   return stockByKey;
 }
 
-async function mapProductsForStore(tx, products) {
+async function mapProductsForStore(tx, products, req = null) {
   const stockByKey = await buildStoreStockMap(tx, products);
-  return products.map((p) => mapProductForStore(p, p.variants || [], stockByKey));
+  return products.map((p) => mapProductForStore(p, p.variants || [], stockByKey, req));
 }
 
 /**

@@ -163,11 +163,18 @@ class AuthController {
 
       if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
 
+      let csrfToken = req.cookies?.csrf_token;
+      if (!csrfToken) {
+        csrfToken = crypto.randomBytes(32).toString('hex');
+        res.cookie('csrf_token', csrfToken, { ...COOKIE_BASE, httpOnly: false });
+      }
+
       // Se for admin, incluímos os dados completos inclusive permissões
       const response = {
         ...user,
         isSuperOwner: isSuperOwner(user.email),
-        permissions: user.role?.permissions.map(p => p.key) || []
+        permissions: user.role?.permissions.map(p => p.key) || [],
+        csrfToken,
       };
 
       return res.json(response);
@@ -292,6 +299,7 @@ class AuthController {
 
       return res.json({
         success: true,
+        csrfToken,
         user: {
           id: user.id,
           name: user.name,

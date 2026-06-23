@@ -1,9 +1,41 @@
 const { PrismaClient } = require('@prisma/client');
-const { validateGatewayCredentials, PIX_GATEWAY_SLUGS } = require('../services/gatewayValidation.service');
+const { validateGatewayCredentials } = require('../services/gatewayValidation.service');
+const {
+  getSupportedMethods,
+  supportsMethod,
+  getGatewayActiveMethods,
+  hasAnyActiveMethod,
+} = require('../config/gatewayCapabilities');
 
 const prisma = new PrismaClient();
 
-const PIX_SLUGS = [...PIX_GATEWAY_SLUGS, 'efi-pix'];
+function buildActiveMethodsFromLegacy(gateway) {
+  const supported = getSupportedMethods(gateway.slug);
+  const legacy = Array.isArray(gateway.config?.paymentMethods)
+    ? gateway.config.paymentMethods.map((m) => String(m).toUpperCase())
+    : [];
+
+  if (gateway.isActive && legacy.length) {
+    return {
+      PIX: supported.includes('PIX') && legacy.includes('PIX'),
+      CARD: supported.includes('CARD') && legacy.includes('CARD'),
+    };
+  }
+
+  return getGatewayActiveMethods(gateway);
+}
+
+function mergeConfigWithActiveMethods(config, activeMethods) {
+  const paymentMethods = [];
+  if (activeMethods.PIX) paymentMethods.push('PIX');
+  if (activeMethods.CARD) paymentMethods.push('CARD');
+
+  return {
+    ...(config || {}),
+    activeMethods,
+    paymentMethods,
+  };
+}
 
 class GatewayController {
   async list(req, res) {
@@ -86,16 +118,6 @@ class GatewayController {
       const { slug } = req.params;
       const { isActive } = req.body;
 
-      if (isActive && PIX_SLUGS.includes(slug)) {
-        await prisma.gatewayConfig.updateMany({
-          where: {
-            isActive: true,
-            slug: { in: PIX_SLUGS.filter((s) => s !== slug) },
-          },
-          data: { isActive: false },
-        });
-      }
-
       const gateway = await prisma.gatewayConfig.upsert({
         where: { slug },
         update: { isActive },
@@ -111,6 +133,67 @@ class GatewayController {
     } catch (err) {
       console.error('[Gateway.toggle]', err);
       return res.status(500).json({ error: 'Erro ao alternar status do gateway' });
+    }
+  }
+
+  async toggleMethod(req, res) {
+    try {
+      const { slug } = req.params;
+      const method = String(req.body?.method || '').trim().toUpperCase();
+      const enabled = Boolean(req.body?.enabled);
+
+      if (!['PIX', 'CARD'].includes(method)) {
+        return res.status(400).json({ error: 'Método inválido' });
+      }
+
+      if (!supportsMethod(slug, method)) {
+        return res.status(400).json({ error: `${method} não é suportado por este gateway` });
+      }
+
+      const existing = await prisma.gatewayConfig.findUnique({ where: { slug } });
+      if (!existing) {
+        return res.status(404).json({ error: 'Gateway não encontrado' });
+      }
+
+      const currentActive = buildActiveMethodsFromLegacy(existing);
+      const nextActive = {
+        ...currentActive,
+        [method]: enabled,
+      };
+
+      if (enabled) {
+        const allGateways = await prisma.gatewayConfig.findMany();
+        await Promise.all(
+          allGateways
+            .filter((gw) => gw.slug !== slug && supportsMethod(gw.slug, method))
+            .map(async (gw) => {
+              const gwActive = buildActiveMethodsFromLegacy(gw);
+              if (!gwActive[method]) return null;
+
+              const updatedMethods = { ...gwActive, [method]: false };
+              return prisma.gatewayConfig.update({
+                where: { id: gw.id },
+                data: {
+                  config: mergeConfigWithActiveMethods(gw.config, updatedMethods),
+                  isActive: hasAnyActiveMethod({ config: { activeMethods: updatedMethods } }),
+                },
+              });
+            })
+        );
+      }
+
+      const updated = await prisma.gatewayConfig.update({
+        where: { slug },
+        data: {
+          config: mergeConfigWithActiveMethods(existing.config, nextActive),
+          isActive: hasAnyActiveMethod({ config: { activeMethods: nextActive } }),
+        },
+      });
+
+      return res.json(updated);
+    } catch (err) {
+      console.error('[Gateway.toggleMethod]', err);
+      return res.status(500).json({ error: 'Erro ao alternar método do gateway' });
     }
   }
 }

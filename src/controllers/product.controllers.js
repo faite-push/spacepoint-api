@@ -47,7 +47,7 @@ class ProductController {
       });
 
       return res.json({
-        products: await mapProductsForStore(prisma, products),
+        products: await mapProductsForStore(prisma, products, req),
       });
     } catch (err) {
       console.error('[Product.list]', err);
@@ -75,7 +75,7 @@ class ProductController {
 
       return res.json({
         product: {
-          ...mapProductForStore(product, product.variants, stockByKey),
+          ...mapProductForStore(product, product.variants, stockByKey, req),
           category: product.category,
         },
       });
@@ -106,7 +106,7 @@ class ProductController {
         availableCount = await ensureDigitalStockSynced(prisma, variant);
       }
 
-      return res.json({ variant: mapVariantForStore(variant, availableCount) });
+      return res.json({ variant: mapVariantForStore(variant, availableCount, req) });
     } catch (err) {
       console.error('[Product.getVariant]', err);
       return res.status(500).json({ error: 'Erro ao buscar variante' });
