@@ -17,6 +17,7 @@ const checkoutLimiter = rateLimit({
 });
 
 router.get('/v2/api/orders/me', authenticate, OrderController.listMine.bind(OrderController));
+router.get('/v2/api/orders/payment-options', authenticate, OrderController.paymentOptions.bind(OrderController));
 router.get('/v2/api/orders/:id', authenticate, OrderController.getOneForCustomer.bind(OrderController));
 router.post('/v2/api/orders', authenticate, csrf, checkoutLimiter, OrderController.create.bind(OrderController));
 router.get('/v2/api/admin/orders', authenticate, requireAdmin, requirePermission('orders:view'), OrderController.listAll.bind(OrderController));

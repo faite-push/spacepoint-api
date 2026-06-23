@@ -8,9 +8,22 @@ const {
   fulfillPaidOrder,
   cancelOrder,
 } = require('../services/orderFulfillment.service');
-const { getOrCreatePixPayment, syncPendingOrderPayment } = require('../services/payment.service');
+const {
+  getCheckoutPaymentOptions,
+  getOrCreateCheckoutPayment,
+  syncPendingOrderPayment,
+} = require('../services/payment.service');
 
 class OrderController {
+  async paymentOptions(req, res) {
+    try {
+      const options = await getCheckoutPaymentOptions();
+      return res.json(options);
+    } catch (err) {
+      return res.status(400).json({ error: err.message || 'Falha ao carregar formas de pagamento' });
+    }
+  }
+
   async create(req, res) {
     try {
       const userId = req.user.id;
@@ -19,6 +32,7 @@ class OrderController {
         null;
       const items = Array.isArray(req.body.items) ? req.body.items : [];
       const couponCode = sanitizeString(req.body.couponCode || '', 64) || null;
+      const paymentMethod = String(req.body.paymentMethod || 'PIX').trim().toUpperCase();
 
       if (!items.length || items.length > 20) {
         return res.status(400).json({ error: 'Carrinho inválido' });
@@ -87,7 +101,7 @@ class OrderController {
           userId,
           orderItems: orderItemsData,
           subtotalCents: subtotal,
-          paymentMethod: 'PIX',
+          paymentMethod,
         });
 
         const total = Math.max(0, subtotal - discountCents);
@@ -203,7 +217,8 @@ class OrderController {
           if (refreshed) Object.assign(order, refreshed);
 
           if (order.status === 'PENDING') {
-            paymentData = await getOrCreatePixPayment(order);
+            const paymentMethod = String(req.query.paymentMethod || 'PIX').trim().toUpperCase();
+            paymentData = await getOrCreateCheckoutPayment(order, paymentMethod);
           }
         }
       }

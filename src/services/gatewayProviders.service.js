@@ -1,6 +1,10 @@
 const axios = require('axios');
 const { prisma } = require('../config/prisma');
 const { createEfiInstance } = require('../config/efi.config');
+const {
+  getPagBankCredentials,
+  pagBankAuthHeaders,
+} = require('../config/pagbank.config');
 const { resolveEfiCertificate } = require('./gatewayValidation.service');
 const { fulfillPaidOrder } = require('./orderFulfillment.service');
 
@@ -30,17 +34,16 @@ function getConfig(gateway) {
 }
 
 async function getPagBankToken(config) {
-  if (config.token || config.accessToken) {
-    return config.token || config.accessToken;
+  const creds = getPagBankCredentials(config);
+  if (creds.hasToken) {
+    return creds.token;
   }
-  const clientId = config.clientId || config.client_id;
-  const clientSecret = config.clientSecret || config.client_secret;
-  const baseUrl = config.sandbox !== false
-    ? 'https://sandbox.api.pagseguro.com'
-    : 'https://api.pagseguro.com';
-  const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+  if (!creds.hasOAuth) {
+    throw new Error('Informe Client ID + Client Secret ou um Access Token PagBank.');
+  }
+  const auth = Buffer.from(`${creds.clientId}:${creds.clientSecret}`).toString('base64');
   const { data } = await axios.post(
-    `${baseUrl}/oauth2/token`,
+    `${creds.baseUrl}/oauth2/token`,
     'grant_type=client_credentials',
     {
       headers: {
@@ -163,10 +166,9 @@ async function createMercadoPagoPix(order, gateway) {
 
 async function createPagBankPix(order, gateway) {
   const config = getConfig(gateway);
+  const creds = getPagBankCredentials(config);
   const token = await getPagBankToken(config);
-  const baseUrl = config.sandbox !== false
-    ? 'https://sandbox.api.pagseguro.com'
-    : 'https://api.pagseguro.com';
+  const baseUrl = creds.baseUrl;
 
   const customerName = order.user?.name || order.customerName || 'Cliente';
   const customerEmail = order.user?.email || order.customerEmail || 'cliente@spacepoint.com';
@@ -202,10 +204,7 @@ async function createPagBankPix(order, gateway) {
     `${baseUrl}/orders`,
     orderPayload,
     {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
+      headers: pagBankAuthHeaders(token, { 'Content-Type': 'application/json' }),
       timeout: 20000,
     }
   );
@@ -240,6 +239,7 @@ async function createStripePix(order, gateway) {
   params.append('amount', String(order.total));
   params.append('currency', 'brl');
   params.append('confirm', 'true');
+  params.append('payment_method_types[]', 'pix');
   params.append('payment_method_data[type]', 'pix');
   params.append('payment_method_data[billing_details][name]', customerName);
   params.append('payment_method_data[billing_details][email]', customerEmail);
@@ -279,6 +279,67 @@ async function createStripePix(order, gateway) {
   }
 }
 
+async function createStripeCard(order, gateway) {
+  const config = getConfig(gateway);
+  const secretKey = config.secretKey || config.secret_key;
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+  const successUrl = `${frontendUrl}/checkout/payment/${order.id}?card=success`;
+  const cancelUrl = `${frontendUrl}/checkout/payment/${order.id}?card=cancel`;
+  const customerEmail = order.user?.email || order.customerEmail || undefined;
+
+  const params = new URLSearchParams();
+  params.append('mode', 'payment');
+  params.append('success_url', successUrl);
+  params.append('cancel_url', cancelUrl);
+  params.append('payment_method_types[]', 'card');
+  params.append('metadata[order_id]', order.id);
+  params.append('expires_at', String(Math.floor((Date.now() + PIX_EXPIRATION_SECONDS * 1000) / 1000)));
+  if (customerEmail) params.append('customer_email', customerEmail);
+
+  (order.items || []).forEach((item, idx) => {
+    const prefix = `line_items[${idx}]`;
+    params.append(`${prefix}[quantity]`, String(item.quantity || 1));
+    params.append(`${prefix}[price_data][currency]`, 'brl');
+    params.append(`${prefix}[price_data][unit_amount]`, String(item.unitPrice || order.total));
+    params.append(
+      `${prefix}[price_data][product_data][name]`,
+      String(item.product?.name || item.variantName || 'Produto').slice(0, 120)
+    );
+  });
+
+  if (!order.items?.length) {
+    params.append('line_items[0][quantity]', '1');
+    params.append('line_items[0][price_data][currency]', 'brl');
+    params.append('line_items[0][price_data][unit_amount]', String(order.total));
+    params.append('line_items[0][price_data][product_data][name]', `Pedido ${order.id}`);
+  }
+
+  try {
+    const { data } = await axios.post('https://api.stripe.com/v1/checkout/sessions', params, {
+      auth: { username: secretKey, password: '' },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      timeout: 20000,
+    });
+
+    const metadata = {
+      type: 'CARD',
+      provider: 'stripe',
+      checkoutUrl: data.url,
+      sessionId: data.id,
+      expiresAt: data.expires_at
+        ? new Date(data.expires_at * 1000).toISOString()
+        : new Date(Date.now() + PIX_EXPIRATION_SECONDS * 1000).toISOString(),
+      status: data.payment_status || 'unpaid',
+    };
+
+    return savePixPayment(order, 'stripe', data.id, metadata);
+  } catch (err) {
+    const stripeError = err.response?.data?.error?.message || err.message;
+    console.error('[Stripe Card Error]', err.response?.data || err.message);
+    throw new Error(`Stripe: ${stripeError}`);
+  }
+}
+
 
 const CREATORS = {
   'efi-bank': createEfiPix,
@@ -288,10 +349,21 @@ const CREATORS = {
   stripe: createStripePix,
 };
 
+const CARD_CREATORS = {
+  stripe: createStripeCard,
+};
+
 async function createPixCharge(order, gateway) {
   const slug = normalizeSlug(gateway.slug);
   const creator = CREATORS[slug];
   if (!creator) throw new Error(`Provedor PIX não suportado: ${slug}`);
+  return creator(order, gateway);
+}
+
+async function createCardCharge(order, gateway) {
+  const slug = normalizeSlug(gateway.slug);
+  const creator = CARD_CREATORS[slug];
+  if (!creator) throw new Error(`Provedor cartão não suportado: ${slug}`);
   return creator(order, gateway);
 }
 
@@ -350,14 +422,27 @@ async function verifyMercadoPagoPayment(payment, gateway) {
 
 async function verifyPagBankPayment(payment, gateway) {
   const config = getConfig(gateway);
+  const creds = getPagBankCredentials(config);
   const token = await getPagBankToken(config);
-  const baseUrl = config.sandbox !== false
-    ? 'https://sandbox.api.pagseguro.com'
-    : 'https://api.pagseguro.com';
-  const { data } = await axios.get(`${baseUrl}/orders/${payment.externalId}`, {
-    headers: { Authorization: `Bearer ${token}` },
-    timeout: 15000,
-  });
+  let data;
+  try {
+    const response = await axios.get(`${creds.baseUrl}/orders/${payment.externalId}`, {
+      headers: pagBankAuthHeaders(token),
+      timeout: 15000,
+    });
+    data = response.data;
+  } catch (err) {
+    const message = err?.response?.data?.error_messages?.[0]?.description || '';
+    if (message.includes('No known parameter was given') && payment.orderId) {
+      const fallback = await axios.get(`${creds.baseUrl}/orders/${payment.orderId}`, {
+        headers: pagBankAuthHeaders(token),
+        timeout: 15000,
+      });
+      data = fallback.data;
+    } else {
+      throw err;
+    }
+  }
 
   const charge = data.charges?.find((c) => c.status === 'PAID') || data.charges?.[0];
   const isPaid = charge?.status === 'PAID' || data.status === 'PAID';
@@ -373,10 +458,36 @@ async function verifyPagBankPayment(payment, gateway) {
 async function verifyStripePayment(payment, gateway) {
   const config = getConfig(gateway);
   const secretKey = config.secretKey || config.secret_key;
-  const { data } = await axios.get(
-    `https://api.stripe.com/v1/payment_intents/${payment.externalId}`,
-    { auth: { username: secretKey, password: '' }, timeout: 15000 }
-  );
+  let data;
+  if (String(payment.externalId || '').startsWith('cs_')) {
+    const sessionResp = await axios.get(
+      `https://api.stripe.com/v1/checkout/sessions/${payment.externalId}`,
+      {
+        auth: { username: secretKey, password: '' },
+        params: { 'expand[]': 'payment_intent' },
+        timeout: 15000,
+      }
+    );
+    const session = sessionResp.data;
+    if (session.payment_status === 'paid') {
+      const paidCents = session.amount_total || payment.amount;
+      await markPaymentPaid(payment, paidCents, 'Pagamento cartão Stripe confirmado');
+      return true;
+    }
+    const piId = typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent?.id;
+    if (!piId) return false;
+    const piResp = await axios.get(
+      `https://api.stripe.com/v1/payment_intents/${piId}`,
+      { auth: { username: secretKey, password: '' }, timeout: 15000 }
+    );
+    data = piResp.data;
+  } else {
+    const piResp = await axios.get(
+      `https://api.stripe.com/v1/payment_intents/${payment.externalId}`,
+      { auth: { username: secretKey, password: '' }, timeout: 15000 }
+    );
+    data = piResp.data;
+  }
 
   const isPaid = data.status === 'succeeded'
     || (data.status === 'requires_capture' && data.amount_received > 0);
@@ -493,7 +604,7 @@ async function handlePagBankWebhook(body) {
   const orderId = body?.id
     || body?.order_id
     || body?.reference_id
-    || body?.charges?.[0]?.id;
+    || body?.charges?.[0]?.reference_id;
   if (!orderId) return;
 
   const orConditions = [{ externalId: String(orderId), provider: 'pagbank' }];
@@ -547,6 +658,7 @@ async function syncPendingOrderPayment(orderId) {
 module.exports = {
   PROVIDER_SLUGS,
   createPixCharge,
+  createCardCharge,
   verifyAndFulfillPayment,
   syncPendingOrderPayment,
   handleEfiWebhook,

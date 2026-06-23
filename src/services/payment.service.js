@@ -2,6 +2,7 @@ const { prisma } = require('../config/prisma');
 const { PIX_GATEWAY_SLUGS } = require('./gatewayValidation.service');
 const {
   createPixCharge,
+  createCardCharge,
   verifyAndFulfillPayment,
   syncPendingOrderPayment,
   handleEfiWebhook,
@@ -11,6 +12,7 @@ const {
 } = require('./gatewayProviders.service');
 
 const PIX_EXPIRATION_SECONDS = 30 * 60;
+const SUPPORTED_CHECKOUT_METHODS = ['PIX', 'CARD'];
 
 async function getActiveGatewayConfig(slug) {
   return prisma.gatewayConfig.findFirst({
@@ -25,6 +27,29 @@ async function resolveActivePixGateway() {
     if (gw) return gw;
   }
   return null;
+}
+
+function normalizeCheckoutMethod(method) {
+  const normalized = String(method || 'PIX').trim().toUpperCase();
+  return SUPPORTED_CHECKOUT_METHODS.includes(normalized) ? normalized : 'PIX';
+}
+
+function getGatewayConfiguredPaymentMethods(gateway) {
+  const methods = gateway?.config?.paymentMethods;
+  if (!Array.isArray(methods) || methods.length === 0) return ['PIX'];
+  const normalized = methods
+    .map((m) => String(m || '').trim().toUpperCase())
+    .filter((m) => SUPPORTED_CHECKOUT_METHODS.includes(m));
+  return normalized.length ? Array.from(new Set(normalized)) : ['PIX'];
+}
+
+function getGatewayRuntimePaymentMethods(gateway) {
+  const configured = getGatewayConfiguredPaymentMethods(gateway);
+  return configured.filter((method) => {
+    if (method === 'PIX') return true;
+    if (method === 'CARD') return gateway?.slug === 'stripe';
+    return false;
+  });
 }
 
 function isEfiConfigured(dbConfig) {
@@ -53,7 +78,7 @@ function parsePaymentMetadata(payment) {
   return payment.metadata;
 }
 
-async function findPendingPixPayment(orderId) {
+async function findPendingPayment(orderId) {
   return prisma.payment.findFirst({
     where: {
       orderId,
@@ -97,13 +122,28 @@ async function createDevMockPix(order) {
   return metadata;
 }
 
-async function getOrCreatePixPayment(order) {
+async function getCheckoutPaymentOptions() {
+  const gateway = await resolveActivePixGateway();
+  if (!gateway) {
+    return {
+      gateway: null,
+      methods: ['PIX'],
+    };
+  }
+  return {
+    gateway: gateway.slug,
+    methods: getGatewayRuntimePaymentMethods(gateway),
+  };
+}
+
+async function getOrCreateCheckoutPayment(order, paymentMethod = 'PIX') {
+  const selectedMethod = normalizeCheckoutMethod(paymentMethod);
   if (order.status !== 'PENDING') return null;
   if (order.total <= 0) {
     throw new Error('Valor do pedido inválido para pagamento');
   }
 
-  const existing = await findPendingPixPayment(order.id);
+  const existing = await findPendingPayment(order.id);
   if (existing) {
     if (existing.provider !== 'dev-mock-pix') {
       const fulfilled = await verifyAndFulfillPayment(existing);
@@ -124,6 +164,13 @@ async function getOrCreatePixPayment(order) {
 
   const gateway = await resolveActivePixGateway();
   if (gateway) {
+    const availableMethods = getGatewayRuntimePaymentMethods(gateway);
+    if (!availableMethods.includes(selectedMethod)) {
+      throw new Error(`Forma de pagamento ${selectedMethod} não está disponível para o gateway ativo.`);
+    }
+    if (selectedMethod === 'CARD') {
+      return createCardCharge(order, gateway);
+    }
     return createPixCharge(order, gateway);
   }
 
@@ -145,7 +192,8 @@ async function verifyAndFulfillPixByTxid(txid) {
 
 module.exports = {
   isEfiConfigured,
-  getOrCreatePixPayment,
+  getCheckoutPaymentOptions,
+  getOrCreateCheckoutPayment,
   syncPendingOrderPayment,
   verifyAndFulfillPixByTxid,
   verifyAndFulfillPayment,

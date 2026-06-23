@@ -29,10 +29,18 @@ class GatewayController {
 
       const result = await validateGatewayCredentials(slug, config);
       if (!result.valid) {
-        return res.status(400).json({ valid: false, error: result.message });
+        return res.status(400).json({
+          valid: false,
+          error: result.message,
+          enforceSandbox: result.enforceSandbox === true,
+        });
       }
 
-      return res.json({ valid: true, message: result.message });
+      return res.json({
+        valid: true,
+        message: result.message,
+        enforceSandbox: result.enforceSandbox === true,
+      });
     } catch (err) {
       console.error('[Gateway.validate]', err);
       return res.status(500).json({ error: 'Erro ao validar credenciais' });

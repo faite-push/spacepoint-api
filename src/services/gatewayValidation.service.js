@@ -4,6 +4,12 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { createEfiInstance } = require('../config/efi.config');
+const {
+  getPagBankCredentials,
+  pagBankAuthHeaders,
+  isPagBankAuthError,
+  SANDBOX_BASE_URL,
+} = require('../config/pagbank.config');
 
 const PIX_GATEWAY_SLUGS = ['efi-bank', 'mercado-pago', 'pagbank', 'stripe'];
 
@@ -78,23 +84,34 @@ async function validateMercadoPago(config = {}) {
   }
 }
 
-async function validatePagBank(config = {}) {
-  const clientId = config.clientId || config.client_id;
-  const clientSecret = config.clientSecret || config.client_secret;
-  const token = config.token || config.accessToken;
+async function probePagBankToken(baseUrl, token) {
+  await axios.get(`${baseUrl}/orders`, {
+    headers: pagBankAuthHeaders(token),
+    params: { limit: 1, offset: 0 },
+    timeout: 15000,
+  });
+}
 
-  if (token) {
+async function validatePagBank(config = {}) {
+  const creds = getPagBankCredentials(config);
+
+  if (creds.hasToken) {
     try {
-      const baseUrl = config.sandbox !== false
-        ? 'https://sandbox.api.pagseguro.com'
-        : 'https://api.pagseguro.com';
-      await axios.get(`${baseUrl}/orders`, {
-        headers: { Authorization: `Bearer ${token}` },
-        params: { page_size: 1, page: 1 },
-        timeout: 15000,
-      });
+      await probePagBankToken(creds.baseUrl, creds.token);
       return { valid: true, message: 'Token PagBank validado com sucesso.' };
     } catch (err) {
+      if (!creds.sandbox && isPagBankAuthError(err)) {
+        try {
+          await probePagBankToken(SANDBOX_BASE_URL, creds.token);
+          return {
+            valid: false,
+            message: 'Este token é do ambiente de teste (portaldev.pagbank.com.br). Ative o Modo Sandbox e teste novamente.',
+            enforceSandbox: true,
+          };
+        } catch {
+        }
+      }
+
       const msg = err?.response?.data?.error_messages?.[0]?.description
         || err?.response?.data?.message
         || err?.message
@@ -103,17 +120,14 @@ async function validatePagBank(config = {}) {
     }
   }
 
-  if (!clientId || !clientSecret) {
+  if (!creds.hasOAuth) {
     return { valid: false, message: 'Informe Client ID + Client Secret ou um Access Token.' };
   }
 
   try {
-    const baseUrl = config.sandbox !== false
-      ? 'https://sandbox.api.pagseguro.com'
-      : 'https://api.pagseguro.com';
-    const auth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
+    const auth = Buffer.from(`${creds.clientId}:${creds.clientSecret}`).toString('base64');
     const { data } = await axios.post(
-      `${baseUrl}/oauth2/token`,
+      `${creds.baseUrl}/oauth2/token`,
       'grant_type=client_credentials',
       {
         headers: {
