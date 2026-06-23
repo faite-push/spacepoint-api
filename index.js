@@ -34,7 +34,20 @@ function parseAllowedOrigins() {
     origins.push("http://localhost:3000", "http://127.0.0.1:3000");
   }
 
-  return [...new Set(origins)];
+  const expanded = [...origins];
+  for (const origin of origins) {
+    try {
+      const url = new URL(origin);
+      const altHost = url.hostname.startsWith("www.")
+        ? url.hostname.slice(4)
+        : `www.${url.hostname}`;
+      expanded.push(`${url.protocol}//${altHost}${url.port ? `:${url.port}` : ""}`);
+    } catch {
+      // ignore invalid URLs
+    }
+  }
+
+  return [...new Set(expanded)];
 }
 
 const allowedOrigins = parseAllowedOrigins();
