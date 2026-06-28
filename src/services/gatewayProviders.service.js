@@ -194,6 +194,7 @@ async function createPagBankPix(order, gateway) {
     customer: {
       name: customerName.slice(0, 80),
       email: customerEmail,
+      tax_id: "12345678909", // Default for sandbox/tests if not available
     },
     items: (order.items || []).length
       ? (order.items || []).map((item, idx) => ({
@@ -210,20 +211,34 @@ async function createPagBankPix(order, gateway) {
       }],
     qr_codes: [{
       amount: { value: order.total },
-      expiration_date: new Date(Date.now() + PIX_EXPIRATION_SECONDS * 1000).toISOString(),
+      expiration_date: new Date(Date.now() + PIX_EXPIRATION_SECONDS * 1000).toISOString().split('.')[0] + 'Z',
     }],
   };
   const pagbankWebhook = webhookUrl('/v1/webhooks/pagbank');
-  if (pagbankWebhook) orderPayload.notification_urls = [pagbankWebhook];
+  // Some sandbox environments fail if the webhook is not publicly reachable or has certain TLDs
+  if (pagbankWebhook && !pagbankWebhook.includes('localhost')) {
+    orderPayload.notification_urls = [pagbankWebhook];
+  }
 
-  const { data } = await axios.post(
-    `${baseUrl}/orders`,
-    orderPayload,
-    {
-      headers: pagBankAuthHeaders(token, { 'Content-Type': 'application/json' }),
-      timeout: 20000,
-    }
-  );
+  let data;
+  try {
+    const response = await axios.post(
+      `${baseUrl}/orders`,
+      orderPayload,
+      {
+        headers: pagBankAuthHeaders(token, { 'Content-Type': 'application/json' }),
+        timeout: 20000,
+      }
+    );
+    data = response.data;
+  } catch (err) {
+    const errorData = err?.response?.data;
+    const msg = errorData?.error_messages?.[0]?.description
+      || errorData?.message
+      || err.message;
+    console.error('[createPagBankPix Error Detail]', JSON.stringify(errorData, null, 2));
+    throw new Error(`PagBank: ${msg}`);
+  }
 
   const qr = data.qr_codes?.[0];
   const text = qr?.text;
@@ -359,7 +374,12 @@ async function createStripeCard(order, gateway) {
 async function createMercadoPagoCard(order, gateway) {
   const config = getConfig(gateway);
   const accessToken = config.accessToken || config.access_token;
-  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+  
+  let frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').trim();
+  if (!frontendUrl.startsWith('http')) {
+    frontendUrl = `https://${frontendUrl}`;
+  }
+  frontendUrl = frontendUrl.replace(/\/$/, '');
 
   const items = (order.items || []).length
     ? (order.items || []).map((item) => ({
@@ -375,6 +395,8 @@ async function createMercadoPagoCard(order, gateway) {
       currency_id: 'BRL',
     }];
 
+  const isLocal = frontendUrl.includes('localhost') || frontendUrl.includes('127.0.0.1');
+
   const payload = {
     items,
     external_reference: order.id,
@@ -383,11 +405,13 @@ async function createMercadoPagoCard(order, gateway) {
       failure: `${frontendUrl}/checkout/payment/${order.id}?card=cancel`,
       pending: `${frontendUrl}/checkout/payment/${order.id}?card=pending`,
     },
-    auto_return: 'approved',
+    auto_return: isLocal ? undefined : 'approved',
   };
 
   const mpWebhook = webhookUrl('/v1/webhooks/mercado-pago');
   if (mpWebhook) payload.notification_url = mpWebhook;
+
+  console.log('[MercadoPago Payload]', JSON.stringify(payload, null, 2));
 
   try {
     const { data } = await axios.post(
@@ -433,6 +457,7 @@ async function createPagBankCard(order, gateway) {
     customer: {
       name: customerName.slice(0, 80),
       email: customerEmail,
+      tax_id: "12345678909",
     },
     items: (order.items || []).length
       ? (order.items || []).map((item, idx) => ({

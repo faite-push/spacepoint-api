@@ -1,6 +1,7 @@
 const { prisma } = require('../config/prisma');
 const { resolveSellable } = require('../utils/productStore');
 const { syncAutomaticStockFromCodes } = require('../utils/digitalStock');
+const { initializeChatForPaidOrder } = require('./chat.service');
 
 const ORDER_PAYMENT_TTL_MS = 30 * 60 * 1000;
 
@@ -239,11 +240,19 @@ async function fulfillPaidOrder(tx, orderId, paymentMeta = {}) {
     data: { status: 'CANCELLED' },
   });
 
-  return tx.order.update({
+  const updatedOrder = await tx.order.update({
     where: { id: current.id },
     data: { status: 'PAID', paidAt: new Date() },
     include: { items: { include: { codes: true, variant: true } } },
   });
+
+  try {
+    await initializeChatForPaidOrder(tx, current.id);
+  } catch (err) {
+    console.error('[fulfillPaidOrder] Failed to initialize chat', err);
+  }
+
+  return updatedOrder;
 }
 
 async function cancelOrder(tx, orderId, reason = 'cancelled') {

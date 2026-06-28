@@ -29,7 +29,7 @@ function isEmailAllowed(email) {
 }
 
 function setSessionCookies(res, user) {
-  const payload = { id: user.id, name: user.name, image: user.image };
+  const payload = { id: user.id, name: user.name, image: user.image, isAdmin: true };
   const token = generateToken(payload, { expiresIn: '2h' });
   const csrfToken = crypto.randomBytes(32).toString('hex');
 

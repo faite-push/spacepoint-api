@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@babel/plugin-transform-runtime':
+        specifier: ^7.27.1
+        version: 7.28.5(@babel/core@7.28.5)
       '@prisma/client':
         specifier: ^6.2.1
         version: 6.19.1(prisma@6.19.1)
@@ -32,6 +35,12 @@ importers:
       dotenv:
         specifier: ^16.4.5
         version: 16.6.1
+      dotenv-cli:
+        specifier: ^11.0.0
+        version: 11.0.0
+      eslint:
+        specifier: ^8.57.1
+        version: 8.57.1
       express:
         specifier: ^4.18.3
         version: 4.22.1
@@ -62,12 +71,18 @@ importers:
       nodemailer:
         specifier: ^7.0.12
         version: 7.0.12
+      nodemon:
+        specifier: ^2.0.22
+        version: 2.0.22
       otplib:
         specifier: ^13.4.0
         version: 13.4.0
       path:
         specifier: ^0.12.7
         version: 0.12.7
+      prisma:
+        specifier: ^6.2.1
+        version: 6.19.1
       qrcode:
         specifier: ^1.5.4
         version: 1.5.4
@@ -86,22 +101,6 @@ importers:
       zod:
         specifier: ^3.24.1
         version: 3.25.76
-    devDependencies:
-      '@babel/plugin-transform-runtime':
-        specifier: ^7.27.1
-        version: 7.28.5(@babel/core@7.28.5)
-      dotenv-cli:
-        specifier: ^11.0.0
-        version: 11.0.0
-      eslint:
-        specifier: ^8.57.1
-        version: 8.57.1
-      nodemon:
-        specifier: ^2.0.22
-        version: 2.0.22
-      prisma:
-        specifier: ^6.2.1
-        version: 6.19.1
 
 packages:
 

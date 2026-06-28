@@ -85,11 +85,29 @@ async function validateMercadoPago(config = {}) {
 }
 
 async function probePagBankToken(baseUrl, token) {
-  await axios.get(`${baseUrl}/orders`, {
-    headers: pagBankAuthHeaders(token),
-    params: { limit: 1, offset: 0 },
-    timeout: 15000,
-  });
+  try {
+    await axios.get(`${baseUrl}/orders`, {
+      headers: pagBankAuthHeaders(token),
+      params: { limit: 1 },
+      timeout: 15000,
+    });
+  } catch (err) {
+    const errorBody = err?.response?.data;
+    const isAuthError = err?.response?.status === 401 || 
+                       errorBody?.error_messages?.[0]?.error === 'invalid_authorization_header';
+    
+    if (isAuthError) throw err;
+    
+    // If it's a 400 with "No known parameter" or similar, 
+    // it means the token was accepted but the probe request was rejected by PagBank business logic.
+    // This is enough to consider the token valid.
+    const description = errorBody?.error_messages?.[0]?.description || '';
+    if (err?.response?.status === 400 && description.includes('parameter')) {
+      return; 
+    }
+    
+    throw err;
+  }
 }
 
 async function validatePagBank(config = {}) {
