@@ -272,6 +272,7 @@ model SiteConfig {
   chatPreChatQuestions        String?
   chatWelcomeMessage          String?
   chatAutomatedMessages       String?
+  pluginsConfig               Json?
 }
 
 model InstitutionalPage {

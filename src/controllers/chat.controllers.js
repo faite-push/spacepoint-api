@@ -933,11 +933,21 @@ class ChatController {
 
       const clients = await Promise.all(
         users.map(async (u) => {
-          const stats = await prisma.order.aggregate({
-            where: { userId: u.id, status: { in: ['PAID', 'DELIVERED'] } },
-            _sum: { total: true },
-            _count: { id: true },
-          });
+          const [stats, itemsStats, discountStats] = await Promise.all([
+            prisma.order.aggregate({
+              where: { userId: u.id, status: { in: ['PAID', 'DELIVERED'] } },
+              _sum: { total: true },
+              _count: { id: true },
+            }),
+            prisma.orderItem.aggregate({
+              where: { order: { userId: u.id, status: { in: ['PAID', 'DELIVERED'] } } },
+              _sum: { quantity: true },
+            }),
+            prisma.order.aggregate({
+              where: { userId: u.id, status: { in: ['PAID', 'DELIVERED'] } },
+              _sum: { discount: true },
+            }),
+          ]);
           return {
             id: u.id,
             name: u.name,
@@ -947,6 +957,8 @@ class ChatController {
             recentOrders: u.orders,
             ordersCount: stats._count.id,
             totalSpent: stats._sum.total || 0,
+            totalItemsCount: itemsStats._sum.quantity || 0,
+            totalDiscounts: discountStats._sum.discount || 0,
           };
         })
       );

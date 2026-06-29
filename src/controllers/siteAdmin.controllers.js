@@ -270,6 +270,13 @@ class SiteAdminController {
         data.checkoutSettings = normalizeCheckoutSettings(body.checkoutSettings);
       }
 
+      if (body.pluginsConfig !== undefined) {
+        data.pluginsConfig =
+          body.pluginsConfig && typeof body.pluginsConfig === 'object' && !Array.isArray(body.pluginsConfig)
+            ? body.pluginsConfig
+            : null;
+      }
+
       const config = await prisma.siteConfig.upsert({
         where: { id: 'default' },
         update: data,

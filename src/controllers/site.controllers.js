@@ -2,6 +2,28 @@ const { prisma } = require('../config/prisma');
 const { resolveEntityMedia } = require('../utils/mediaUrl');
 const { normalizeCheckoutSettings } = require('../utils/checkoutConfig');
 
+function sanitizePublicPluginsConfig(pluginsConfig) {
+  if (!pluginsConfig || typeof pluginsConfig !== 'object' || Array.isArray(pluginsConfig)) {
+    return null;
+  }
+
+  const out = {};
+  for (const [id, entry] of Object.entries(pluginsConfig)) {
+    if (
+      entry &&
+      typeof entry === 'object' &&
+      entry.enabled === true &&
+      entry.config &&
+      typeof entry.config === 'object' &&
+      !Array.isArray(entry.config)
+    ) {
+      out[id] = { enabled: true, config: entry.config };
+    }
+  }
+
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 class SiteController {
   async getConfig(req, res) {
     const config = await prisma.siteConfig.upsert({
@@ -11,9 +33,12 @@ class SiteController {
     });
 
     const resolved = resolveEntityMedia(config, req);
+    const { pluginsConfig: _rawPlugins, ...publicConfig } = resolved;
+
     return res.json({
-      ...resolved,
+      ...publicConfig,
       checkoutSettings: normalizeCheckoutSettings(config.checkoutSettings),
+      pluginsConfig: sanitizePublicPluginsConfig(config.pluginsConfig),
     });
   }
 
