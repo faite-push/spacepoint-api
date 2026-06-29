@@ -247,12 +247,44 @@ async function fulfillPaidOrder(tx, orderId, paymentMeta = {}) {
   });
 
   try {
-    await initializeChatForPaidOrder(tx, current.id);
+    const chat = await initializeChatForPaidOrder(tx, current.id);
+    if (chat?.id) {
+      updatedOrder._wsChatId = chat.id;
+      updatedOrder._wsUserId = current.userId;
+    }
   } catch (err) {
     console.error('[fulfillPaidOrder] Failed to initialize chat', err);
   }
 
   return updatedOrder;
+}
+
+function notifyOrderChatCreated(order) {
+  if (!order?._wsChatId) return;
+
+  setImmediate(async () => {
+    try {
+      const socketService = require('./websocket.service');
+      const chat = await prisma.chat.findUnique({
+        where: { id: order._wsChatId },
+        include: {
+          order: { include: { user: { select: { name: true, email: true } } } },
+          messages: { orderBy: { createdAt: 'desc' }, take: 1 },
+        },
+      });
+      if (!chat) return;
+
+      const customerName = chat.order.user?.name || chat.order.user?.email || 'Cliente';
+      socketService.notifyChatCreated(
+        chat.id,
+        order._wsUserId,
+        chat.messages[0] || null,
+        { orderId: chat.orderId, customerName }
+      );
+    } catch (err) {
+      console.error('[notifyOrderChatCreated]', err.message);
+    }
+  });
 }
 
 async function cancelOrder(tx, orderId, reason = 'cancelled') {
@@ -306,5 +338,6 @@ module.exports = {
   deliverOrderItem,
   fulfillPaidOrder,
   cancelOrder,
+  notifyOrderChatCreated,
   expireStalePendingOrders,
 };

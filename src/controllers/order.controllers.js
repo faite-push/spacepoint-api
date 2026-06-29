@@ -6,6 +6,7 @@ const {
   ORDER_PAYMENT_TTL_MS,
   reserveStockForOrderItem,
   fulfillPaidOrder,
+  notifyOrderChatCreated,
   cancelOrder,
 } = require('../services/orderFulfillment.service');
 const {
@@ -118,6 +119,8 @@ class OrderController {
             paymentMethod,
             couponCode,
             checkoutData: req.body.checkoutData || null,
+            clientIp: req.ip || req.headers['x-forwarded-for']?.split(',')[0]?.trim() || null,
+            userAgent: sanitizeString(req.headers['user-agent'] || '', 512) || null,
             items: { create: orderItemsData },
           },
           include: { items: true },
@@ -243,6 +246,8 @@ class OrderController {
           description: 'Pagamento aprovado manualmente',
         })
       );
+
+      notifyOrderChatCreated(order);
 
       return res.json({ order });
     } catch (err) {
@@ -422,6 +427,10 @@ class OrderController {
         });
       });
 
+      if (status === 'PAID') {
+        notifyOrderChatCreated(order);
+      }
+
       return res.json(order);
     } catch (err) {
       console.error('[OrderController.updateStatus]', err);
@@ -439,13 +448,16 @@ class OrderController {
         return res.status(400).json({ error: 'Status inválido' });
       }
 
+      const paidOrders = [];
+
       await prisma.$transaction(async (tx) => {
         for (const id of ids) {
           if (status === 'PAID') {
-            await fulfillPaidOrder(tx, id, {
+            const order = await fulfillPaidOrder(tx, id, {
               provider: 'manual-admin',
               description: 'Pagamento aprovado via admin (Bulk)',
             });
+            paidOrders.push(order);
           } else if (status === 'CANCELLED') {
             await cancelOrder(tx, id, 'Cancelado em massa pelo administrador');
           } else {
@@ -453,6 +465,10 @@ class OrderController {
           }
         }
       });
+
+      for (const order of paidOrders) {
+        notifyOrderChatCreated(order);
+      }
 
       return res.json({ success: true });
     } catch (err) {

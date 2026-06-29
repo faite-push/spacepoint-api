@@ -27,6 +27,7 @@ model User {
   orders       Order[]
   payments     Payment[]
   role         Role?         @relation(fields: [roleId], references: [id])
+  assignedChats Chat[]       @relation("ChatAssignee")
 
   @@index([roleId])
 }
@@ -160,6 +161,8 @@ model Order {
   paymentMethod    String?
   couponCode       String?
   checkoutData     Json?
+  clientIp         String?
+  userAgent        String?
   chat             Chat?
   couponUsage      CouponUsage?
   user             User         @relation(fields: [userId], references: [id])
@@ -268,6 +271,7 @@ model SiteConfig {
   chatPreChatEnabled          Boolean  @default(false)
   chatPreChatQuestions        String?
   chatWelcomeMessage          String?
+  chatAutomatedMessages       String?
 }
 
 model InstitutionalPage {
@@ -441,18 +445,24 @@ model GatewayConfig {
 }
 
 model Chat {
-  id              String        @id @default(cuid())
-  orderId         String        @unique
-  status          String        @default("OPEN")
-  isResolved      Boolean       @default(false)
-  rating          Int?
-  ratingComment   String?
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
-  lastAdminReadAt DateTime?
-  order           Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  messages        ChatMessage[]
-  labels          ChatLabel[]   @relation("ChatToLabel")
+  id                   String        @id @default(cuid())
+  orderId              String        @unique
+  status               String        @default("OPEN")
+  isArchived           Boolean       @default(false)
+  isResolved           Boolean       @default(false)
+  rating               Int?
+  ratingComment        String?
+  ratingTags           Json?
+  isAnonymousRating    Boolean       @default(false)
+  assignedToId         String?
+  firstAdminResponseAt DateTime?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  lastAdminReadAt      DateTime?
+  order                Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  assignedTo           User?         @relation("ChatAssignee", fields: [assignedToId], references: [id])
+  messages             ChatMessage[]
+  labels               ChatLabel[]   @relation("ChatToLabel")
 }
 
 model ChatMessage {
@@ -462,21 +472,35 @@ model ChatMessage {
   content   String
   type      String   @default("TEXT")
   fileUrl   String?
+  isPinned  Boolean  @default(false)
   createdAt DateTime @default(now())
   chat      Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
 }
 
 model ChatLabel {
-  id    String @id @default(cuid())
-  name  String @unique
-  color String @default("#3b82f6")
-  chats Chat[] @relation("ChatToLabel")
+  id         String               @id @default(cuid())
+  name       String               @unique
+  color      String               @default("#3b82f6")
+  chats      Chat[]               @relation("ChatToLabel")
+  references ChatLabelReference[]
+}
+
+model ChatLabelReference {
+  id          String    @id @default(cuid())
+  labelId     String
+  type        String
+  referenceId String
+  label       ChatLabel @relation(fields: [labelId], references: [id], onDelete: Cascade)
+
+  @@index([labelId])
+  @@index([type, referenceId])
 }
 
 model ChatMacro {
   id        String   @id @default(cuid())
   shortcut  String   @unique
   content   String
+  category  String   @default("geral")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

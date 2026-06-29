@@ -190,12 +190,13 @@ class SiteAdminController {
         'homeShowcaseTitle', 'homeShowcaseSubtitle',
         'popupTitle', 'popupDescription', 'popupImageUrl', 'popupCtaLabel', 'popupCtaLink',
         'socialFacebook', 'socialInstagram', 'socialTwitter', 'socialLinkedin', 'socialYoutube',
+        'chatWelcomeMessage', 'chatPreChatQuestions', 'chatAutomatedMessages',
       ];
 
       const booleanFields = [
         'footerNewsletterEnabled', 'footerShowNoise', 'topBarEnabled', 'topBarDismissible',
         'maintenanceModeEnabled', 'homeReviewsEnabled',
-        'homeShowcaseEnabled', 'popupEnabled',
+        'homeShowcaseEnabled', 'popupEnabled', 'chatPreChatEnabled',
       ];
       for (const field of booleanFields) {
         if (body[field] !== undefined) {

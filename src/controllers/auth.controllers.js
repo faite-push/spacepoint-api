@@ -2,18 +2,9 @@ const { generateToken } = require('../config/jwt');
 const { prisma } = require('../config/prisma');
 const { sendOtpEmail } = require('../config/email');
 const { isSuperOwner } = require('../utils/auth');
+const { COOKIE_BASE } = require('../config/cookies');
 const axios = require('axios');
 const crypto = require('crypto');
-
-const isProduction = process.env.NODE_ENV === 'production';
-const COOKIE_BASE = {
-  httpOnly: true,
-  secure: process.env.NODE_ENV === 'production' || process.env.COOKIE_SAME_SITE === 'none',
-  sameSite: process.env.COOKIE_SAME_SITE || (process.env.NODE_ENV === 'production' ? 'none' : 'lax'),
-  domain: process.env.COOKIE_DOMAIN || undefined,
-  maxAge: 7 * 24 * 60 * 60 * 1000,
-  path: '/',
-};
 
 const setAuthCookies = (res, user) => {
   const payload = { id: user.id, name: user.name, image: user.image };
@@ -21,8 +12,8 @@ const setAuthCookies = (res, user) => {
   const csrfToken = crypto.randomBytes(32).toString('hex');
 
 
-  res.cookie('access_token', token, COOKIE_BASE);
-  res.cookie('csrf_token', csrfToken, { ...COOKIE_BASE, httpOnly: false });
+  res.cookie('access_token', token, { ...COOKIE_BASE, maxAge: 7 * 24 * 60 * 60 * 1000 });
+  res.cookie('csrf_token', csrfToken, { ...COOKIE_BASE, httpOnly: false, maxAge: 7 * 24 * 60 * 60 * 1000 });
 };
 
 const upsertUser = async ({ provider, providerId, name, email, image }) => {
@@ -294,8 +285,8 @@ class AuthController {
       const token = generateToken(payload);
       const csrfToken = crypto.randomBytes(32).toString('hex');
 
-      res.cookie('access_token', token, COOKIE_BASE);
-      res.cookie('csrf_token', csrfToken, { ...COOKIE_BASE, httpOnly: false });
+      res.cookie('access_token', token, { ...COOKIE_BASE, maxAge: 7 * 24 * 60 * 60 * 1000 });
+      res.cookie('csrf_token', csrfToken, { ...COOKIE_BASE, httpOnly: false, maxAge: 7 * 24 * 60 * 60 * 1000 });
 
       return res.json({
         success: true,

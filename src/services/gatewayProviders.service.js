@@ -6,7 +6,7 @@ const {
   pagBankAuthHeaders,
 } = require('../config/pagbank.config');
 const { resolveEfiCertificate } = require('./gatewayValidation.service');
-const { fulfillPaidOrder } = require('./orderFulfillment.service');
+const { fulfillPaidOrder, notifyOrderChatCreated } = require('./orderFulfillment.service');
 
 const PIX_EXPIRATION_SECONDS = 30 * 60;
 const PROVIDER_SLUGS = ['efi-bank', 'mercado-pago', 'pagbank', 'stripe'];
@@ -588,8 +588,9 @@ async function createCardCharge(order, gateway) {
 }
 
 async function markPaymentPaid(payment, paidCents, description) {
+  let orderResult = null;
   await prisma.$transaction(async (tx) => {
-    await fulfillPaidOrder(tx, payment.orderId, {
+    orderResult = await fulfillPaidOrder(tx, payment.orderId, {
       provider: payment.provider,
       externalId: payment.externalId,
       description,
@@ -600,6 +601,7 @@ async function markPaymentPaid(payment, paidCents, description) {
       data: { status: 'PAID', amount: paidCents },
     });
   });
+  notifyOrderChatCreated(orderResult);
   return true;
 }
 

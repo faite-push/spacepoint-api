@@ -3,14 +3,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const speakeasy = require('speakeasy');
 const { generateToken, verifyToken } = require('../config/jwt');
-
-const COOKIE_BASE = {
-  httpOnly: true,
-  secure: process.env.NODE_ENV === 'production',
-  sameSite: process.env.COOKIE_SAME_SITE || (process.env.NODE_ENV === 'production' ? 'none' : 'lax'),
-  domain: process.env.COOKIE_DOMAIN || undefined,
-  path: '/',
-};
+const { COOKIE_BASE } = require('../config/cookies');
 
 const PREAUTH_COOKIE = 'preauth_token';
 

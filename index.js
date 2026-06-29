@@ -43,7 +43,6 @@ function parseAllowedOrigins() {
         : `www.${url.hostname}`;
       expanded.push(`${url.protocol}//${altHost}${url.port ? `:${url.port}` : ""}`);
     } catch {
-      // ignore invalid URLs
     }
   }
 
@@ -101,9 +100,16 @@ try {
 } catch {
 }
 
-app.listen({
+const http = require('http');
+const server = http.createServer(app);
+const socketService = require('./src/services/websocket.service');
+
+socketService.init(server, allowedOrigins);
+
+server.listen({
   host: "0.0.0.0",
   port: process.env.PORT,
 }, () => {
-  console.log(`[API] Server running on port ${process.env.PORT}`);
+  console.log(`[API + WebSockets] Server running on port ${process.env.PORT}`);
 });
+
