@@ -14,7 +14,7 @@ async function reserveStockForOrderItem(tx, item, orderItemId, sellable) {
   const deliveryType = entity.deliveryType;
   let stockReserved = 0;
 
-  if (deliveryType === 'automatic_lines') {
+  if (deliveryType === 'automatic_lines' || deliveryType === 'mixed') {
     const codes = await tx.productCode.findMany({
       where: {
         status: 'AVAILABLE',
@@ -37,8 +37,11 @@ async function reserveStockForOrderItem(tx, item, orderItemId, sellable) {
     }
     await syncAutomaticStockFromCodes(tx, item.productId, item.variantId ?? null);
   } else {
-    const manualStock = entity.stockQuantity ?? 0;
-    if (manualStock > 0) {
+    const manualStock = entity.stockQuantity;
+    if (manualStock != null) {
+      if (manualStock <= 0) {
+        throw new Error('Estoque insuficiente para reserva');
+      }
       if (sellable.variant) {
         const updated = await tx.productVariant.updateMany({
           where: {
@@ -73,7 +76,7 @@ async function reserveStockForOrderItem(tx, item, orderItemId, sellable) {
 async function deliverOrderItem(tx, item) {
   const sellable = await getSellableForItem(tx, item);
   const deliveryType = sellable.variant?.deliveryType ?? sellable.product.deliveryType;
-  if (deliveryType !== 'automatic_lines') return;
+  if (deliveryType !== 'automatic_lines' && deliveryType !== 'mixed') return;
 
   const reserved = await tx.productCode.findMany({
     where: { orderItemId: item.id, status: 'RESERVED' },
@@ -146,7 +149,7 @@ async function releaseOrderStock(tx, orderId) {
       select: { deliveryType: true },
     });
     const deliveryType = variant?.deliveryType ?? product?.deliveryType;
-    if (deliveryType === 'automatic_lines') {
+    if (deliveryType === 'automatic_lines' || deliveryType === 'mixed') {
       await syncAutomaticStockFromCodes(tx, item.productId, item.variantId ?? null);
     }
 

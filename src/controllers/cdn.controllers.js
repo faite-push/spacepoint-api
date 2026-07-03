@@ -7,6 +7,12 @@ const sharp = require('sharp');
 const { buildCdnUrl } = require('../utils/mediaUrl');
 
 const UPLOAD_DIR = path.join(__dirname, '../', 'cdn');
+const CHAT_FILE_PREFIX = 'chat-';
+
+function isChatUpload(req) {
+  const url = req.originalUrl || req.url || '';
+  return req.body?.type === 'chat' || req.body?.scope === 'chat' || url.includes('/upload/chat');
+}
 
 (async () => {
   try {
@@ -77,19 +83,21 @@ class CdnController {
         return res.status(400).json({ error: 'Nenhum arquivo enviado' });
       };
 
-      const type = req.body.type || 'general';
+      const uploadType = isChatUpload(req) ? 'chat' : (req.body.type || 'general');
       const originalName = req.file.originalname || 'file';
-      
-      const filename = crypto.randomUUID() + '.webp';
+
+      const filename = uploadType === 'chat'
+        ? `${CHAT_FILE_PREFIX}${crypto.randomUUID()}.webp`
+        : `${crypto.randomUUID()}.webp`;
       const finalPath = path.join(UPLOAD_DIR, filename);
 
       let imageProcessor = sharp(req.file.path);
 
-      if (type === 'banner') {
+      if (uploadType === 'banner') {
         imageProcessor = imageProcessor
           .resize(3840, 2160, { fit: 'inside', withoutEnlargement: true })
           .webp({ quality: 100 });
-      } else if (type === 'product') {
+      } else if (uploadType === 'product') {
         imageProcessor = imageProcessor
           .resize(2048, 2048, { fit: 'inside', withoutEnlargement: true })
           .webp({ quality: 100 });
@@ -172,6 +180,7 @@ class CdnController {
       let mediaItems = [];
       for (const filename of files) {
         if (filename.startsWith('.') || !filename.endsWith('.webp')) continue;
+        if (filename.startsWith(CHAT_FILE_PREFIX)) continue;
         
         const filePath = path.join(UPLOAD_DIR, filename);
         const stat = await fs.stat(filePath).catch(() => null);

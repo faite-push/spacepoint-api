@@ -129,9 +129,14 @@ function validateStockQuantity(entity, quantity, availableCodeCount) {
     return;
   }
 
-  const manualStock = entity.stockQuantity ?? 0;
-  if (manualStock > 0 && qty > manualStock) {
-    throw new Error('Quantidade indisponível no estoque');
+  const manualStock = entity.stockQuantity;
+  if (manualStock == null) return;
+  if (manualStock <= 0 || qty > manualStock) {
+    throw new Error(
+      isVariant
+        ? 'Esta variante está sem estoque no momento'
+        : 'Este produto está sem estoque no momento'
+    );
   }
 }
 

@@ -16,6 +16,7 @@ router.put('/v2/api/admin/categories/:id', authenticate, requireAdmin, requirePe
 router.delete('/v2/api/admin/categories/:id', authenticate, requireAdmin, requirePermission('products:delete'), (req, res) => CategoryController.remove(req, res));
 
 // Público (para navbar/listagens da loja)
+router.get('/v2/api/categories/footer', (req, res) => CategoryController.listFooterPublic(req, res));
 router.get('/v2/api/categories', (req, res) => CategoryController.listPublic(req, res));
 router.get('/v2/api/categories/:slug', (req, res) => CategoryController.getBySlugPublic(req, res));
 

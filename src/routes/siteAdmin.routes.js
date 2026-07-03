@@ -5,18 +5,29 @@ const requireAdmin = require('../middleware/adminMiddleware');
 const requirePermission = require('../middleware/permissionMiddleware');
 
 const router = Router();
-const guard = [authenticate, requireAdmin, requirePermission('settings:manage')];
+const settingsGuard = [
+  authenticate,
+  requireAdmin,
+  requirePermission.any(
+    'settings:manage',
+    'pages:manage',
+    'plugins:manage',
+    'reviews:view',
+    'reviews:manage'
+  ),
+];
+const pagesGuard = [authenticate, requireAdmin, requirePermission('pages:manage')];
 
-router.get('/v2/api/admin/site-settings', ...guard, SiteAdminController.getSettings.bind(SiteAdminController));
-router.put('/v2/api/admin/site-settings', ...guard, SiteAdminController.updateSettings.bind(SiteAdminController));
+router.get('/v2/api/admin/site-settings', ...settingsGuard, SiteAdminController.getSettings.bind(SiteAdminController));
+router.put('/v2/api/admin/site-settings', ...settingsGuard, SiteAdminController.updateSettings.bind(SiteAdminController));
 router.get(
   '/v2/api/admin/institutional-pages',
-  ...guard,
+  ...pagesGuard,
   SiteAdminController.listInstitutionalPages.bind(SiteAdminController)
 );
 router.put(
   '/v2/api/admin/institutional-pages/:slug',
-  ...guard,
+  ...pagesGuard,
   SiteAdminController.updateInstitutionalPage.bind(SiteAdminController)
 );
 

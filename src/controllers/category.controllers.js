@@ -71,6 +71,31 @@ async function wouldCreateCycle(categoryId, newParentId) {
 // ─── Controller ──────────────────────────────────────────────────────────────
 
 class CategoryController {
+  /** GET /v2/api/categories/footer — categorias para coluna do footer */
+  async listFooterPublic(req, res) {
+    try {
+      const rows = await prisma.category.findMany({
+        where: { isActive: true, showInFooter: true },
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          sortOrder: true,
+        },
+      });
+      return res.json({
+        categories: rows.map((row) => ({
+          label: row.name,
+          href: `/category/${row.slug}`,
+        })),
+      });
+    } catch (err) {
+      console.error('[Category.listFooterPublic]', err);
+      return res.status(500).json({ error: 'Erro ao listar categorias do footer' });
+    }
+  }
+
   /** GET /v2/api/categories — árvore pública (somente ativas) */
   async listPublic(req, res) {
     try {
@@ -83,6 +108,7 @@ class CategoryController {
           slug: true,
           imageUrl: true,
           showInNavbar: true,
+          showInFooter: true,
           isActive: true,
           parentId: true,
           sortOrder: true,
@@ -227,6 +253,7 @@ class CategoryController {
           imageUrl: req.body?.imageUrl ? sanitizeString(req.body.imageUrl, 500) : null,
           bannerUrl: req.body?.bannerUrl ? sanitizeString(req.body.bannerUrl, 500) : null,
           showInNavbar: Boolean(req.body?.showInNavbar),
+          showInFooter: Boolean(req.body?.showInFooter),
           isActive: req.body?.isActive !== undefined ? Boolean(req.body.isActive) : true,
           sortOrder: Number.isFinite(Number(req.body?.sortOrder)) ? Number(req.body.sortOrder) : 0,
           parentId: parentId || null,
@@ -266,6 +293,7 @@ class CategoryController {
           : null;
       }
       if (req.body?.showInNavbar !== undefined) data.showInNavbar = Boolean(req.body.showInNavbar);
+      if (req.body?.showInFooter !== undefined) data.showInFooter = Boolean(req.body.showInFooter);
       if (req.body?.isActive !== undefined) data.isActive = Boolean(req.body.isActive);
       if (req.body?.sortOrder !== undefined) {
         const n = Number(req.body.sortOrder);

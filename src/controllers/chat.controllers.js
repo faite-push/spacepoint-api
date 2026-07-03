@@ -1,8 +1,11 @@
 const { prisma } = require('../config/prisma');
 const { sanitizeString, sanitizeChatContent } = require('../utils/sanitize');
+const { resolveSellable } = require('../utils/productStore');
 const { initializeChatForPaidOrder } = require('../services/chat.service');
 const { randomBytes } = require('crypto');
 const socketService = require('../services/websocket.service');
+const { syncAutomaticStockFromCodes } = require('../utils/digitalStock');
+const { getReviewsSettings } = require('../utils/reviewsSettings');
 
 const ORDER_INCLUDE = {
   user: { select: { id: true, name: true, email: true, image: true } },
@@ -49,7 +52,9 @@ async function emitFullChatUpdate(chatId, extra = {}) {
   const fullChat = await fetchFullChat(chatId);
   if (!fullChat) return null;
   socketService.emitToChat(chatId, 'chat_updated', fullChat);
-  socketService.emitToAdmins('chat_list_update', { chatId, ...extra });
+  if (!extra.skipListUpdate) {
+    socketService.emitToAdmins('chat_list_update', { chatId, ...extra });
+  }
   return fullChat;
 }
 
@@ -249,6 +254,8 @@ class ChatController {
               },
             });
 
+            await syncAutomaticStockFromCodes(tx, item.productId, item.variantId ?? null);
+
             deliveryContent = codeToDeliver.code;
           } else {
             const uniquePrefix = randomBytes(8).toString('hex');
@@ -262,6 +269,28 @@ class ChatController {
                 orderItemId: item.id,
               },
             });
+
+            const sellable = await resolveSellable(tx, item.productId, item.variantId, 1);
+            const entity = sellable.variant || sellable.product;
+            const reserved = item.stockReserved ?? 0;
+            const manualStock = entity.stockQuantity;
+            if (manualStock != null && reserved < item.quantity) {
+              if (sellable.variant) {
+                await tx.productVariant.update({
+                  where: { id: sellable.variant.id },
+                  data: { stockQuantity: { decrement: 1 } },
+                });
+              } else {
+                await tx.product.update({
+                  where: { id: sellable.product.id },
+                  data: { stockQuantity: { decrement: 1 } },
+                });
+              }
+              await tx.orderItem.update({
+                where: { id: item.id },
+                data: { stockReserved: { increment: 1 } },
+              });
+            }
           }
 
           await tx.chatMessage.create({
@@ -362,10 +391,30 @@ class ChatController {
         return res.status(400).json({ error: 'Chat encerrado. Reabra o atendimento para enviar mensagens.' });
       }
 
+      const isChatCustomer = chat.order.userId === senderId;
+      const isStaffMessage = req.user.isAdmin && !isChatCustomer;
+
+      let staffTitle = null;
+      if (isStaffMessage) {
+        const staffUser = await prisma.user.findUnique({
+          where: { id: senderId },
+          select: { role: { select: { name: true } } },
+        });
+        staffTitle = staffUser?.role?.name || 'Staff';
+      }
+
+      const displayName =
+        req.user.name?.trim() ||
+        req.user.email?.trim() ||
+        (isStaffMessage ? 'Suporte' : chat.order.user?.name || chat.order.user?.email || 'Cliente');
+
       const message = await prisma.chatMessage.create({
         data: {
           chatId,
-          senderId: req.user.isAdmin ? 'ADMIN' : senderId,
+          senderId: isStaffMessage ? 'ADMIN' : senderId,
+          senderName: displayName,
+          senderRole: isStaffMessage ? 'STAFF' : 'CLIENT',
+          senderStaffTitle: staffTitle,
           content: sanitizeChatContent(content || '', 4000),
           type,
           fileUrl,
@@ -377,7 +426,7 @@ class ChatController {
         data: { updatedAt: new Date() },
       });
 
-      if (req.user.isAdmin) {
+      if (isStaffMessage) {
         const chatMeta = await prisma.chat.findUnique({
           where: { id: chatId },
           select: { firstAdminResponseAt: true },
@@ -391,7 +440,7 @@ class ChatController {
       }
 
       const customerName = chat.order.user?.name || chat.order.user?.email || 'Cliente';
-      socketService.broadcastNewMessage(chatId, chat.order.userId, message, req.user.isAdmin, {
+      socketService.broadcastNewMessage(chatId, chat.order.userId, message, isStaffMessage, {
         orderId: chat.orderId,
         customerName,
       });
@@ -405,7 +454,7 @@ class ChatController {
 
   async listChats(req, res) {
     try {
-      const { search, status, labelId, page = 1, sortBy = 'activity' } = req.query;
+      const { search, status, labelId, deliveryFilter, page = 1, sortBy = 'activity' } = req.query;
       const pageSize = 20;
       const skip = (Number(page) - 1) * pageSize;
 
@@ -425,6 +474,14 @@ class ChatController {
       }
       if (labelId) {
         where.labels = { some: { id: labelId } };
+      }
+      if (deliveryFilter === 'express') {
+        where.order = {
+          OR: [
+            { deliveryOption: 'express' },
+            { adminNotes: { contains: 'ENTREGA EXPRESSA', mode: 'insensitive' } },
+          ],
+        };
       }
       if (search) {
         where.OR = [
@@ -483,6 +540,21 @@ class ChatController {
               select: { id: true },
             });
             if (hasMessages) unreadCount = 1;
+          }
+
+          // Reabertura pelo cliente após admin já ter lido
+          if (unreadCount === 0 && chat.lastAdminReadAt) {
+            const reopenAfterRead = await prisma.chatMessage.findFirst({
+              where: {
+                chatId: chat.id,
+                senderId: 'SYSTEM',
+                type: 'AUTOMATED',
+                content: { contains: 'reabriu' },
+                createdAt: { gt: chat.lastAdminReadAt },
+              },
+              select: { id: true },
+            });
+            if (reopenAfterRead) unreadCount = 1;
           }
 
           return { ...chat, unreadCount };
@@ -598,7 +670,10 @@ class ChatController {
         readAt: chat.lastAdminReadAt,
       });
 
-      socketService.emitToChat(chatId, 'chat_updated', chat);
+      socketService.emitToChat(chatId, 'chat_updated', {
+        id: chat.id,
+        lastAdminReadAt: chat.lastAdminReadAt,
+      });
       socketService.emitToAdmins('chat_list_update', { chatId });
 
       return res.json({ success: true, lastAdminReadAt: chat.lastAdminReadAt });
@@ -787,6 +862,9 @@ class ChatController {
         return res.status(400).json({ error: 'Avaliação inválida' });
       }
 
+      const reviewsSettings = await getReviewsSettings(prisma);
+      const reviewStatus = reviewsSettings.autoPublish ? 'PUBLISHED' : 'PENDING';
+
       const updated = await prisma.chat.update({
         where: { id: chatId },
         data: {
@@ -794,6 +872,7 @@ class ChatController {
           ratingComment: ratingComment ? sanitizeString(ratingComment, 256) : null,
           ratingTags: Array.isArray(ratingTags) ? ratingTags.slice(0, 10) : null,
           isAnonymousRating: Boolean(isAnonymous),
+          reviewStatus,
           status: 'CLOSED',
         },
       });
@@ -835,11 +914,19 @@ class ChatController {
         },
       });
 
+      const customer = await prisma.user.findUnique({
+        where: { id: chat.order.userId },
+        select: { name: true, email: true },
+      });
+      const customerName = customer?.name || customer?.email || 'Cliente';
+
       socketService.broadcastNewMessage(chatId, chat.order.userId, reopenMessage, false, {
         orderId: chat.orderId,
+        type: 'reopened',
+        customerName,
       });
 
-      const fullChat = await emitFullChatUpdate(chatId, { type: 'reopened' });
+      const fullChat = await emitFullChatUpdate(chatId, { skipListUpdate: true });
       return res.json(fullChat);
     } catch (err) {
       console.error('[ChatController.reopenChat]', err);
@@ -973,12 +1060,20 @@ class ChatController {
   async listChatReviews(req, res) {
     try {
       if (!req.user.isAdmin) return res.status(403).json({ error: 'Acesso negado' });
-      const { page = 1, minRating } = req.query;
+      const { page = 1, minRating, status, search } = req.query;
       const pageSize = 20;
       const skip = (Number(page) - 1) * pageSize;
 
       const where = { rating: { not: null } };
       if (minRating) where.rating = { gte: Number(minRating) };
+      if (status && status !== 'ALL') where.reviewStatus = status;
+      if (search) {
+        where.OR = [
+          { ratingComment: { contains: search, mode: 'insensitive' } },
+          { order: { user: { email: { contains: search, mode: 'insensitive' } } } },
+          { order: { user: { name: { contains: search, mode: 'insensitive' } } } },
+        ];
+      }
 
       const [reviews, total, avgResult] = await Promise.all([
         prisma.chat.findMany({
@@ -987,6 +1082,13 @@ class ChatController {
             order: {
               include: {
                 user: { select: { id: true, name: true, email: true, image: true } },
+                items: {
+                  include: {
+                    product: {
+                      select: { id: true, name: true, imageUrl: true, price: true, slug: true },
+                    },
+                  },
+                },
               },
             },
           },
@@ -1007,6 +1109,135 @@ class ChatController {
       });
     } catch (err) {
       console.error('[ChatController.listChatReviews]', err);
+      return res.status(500).json({ error: 'Erro ao listar avaliações' });
+    }
+  }
+
+  async updateChatReview(req, res) {
+    try {
+      if (!req.user.isAdmin) return res.status(403).json({ error: 'Acesso negado' });
+      const { chatId } = req.params;
+      const { reviewStatus, sellerResponse } = req.body;
+
+      const chat = await prisma.chat.findUnique({ where: { id: chatId } });
+      if (!chat || chat.rating == null) {
+        return res.status(404).json({ error: 'Avaliação não encontrada' });
+      }
+
+      const data = {};
+      if (reviewStatus !== undefined) {
+        const allowed = ['PENDING', 'PUBLISHED', 'ARCHIVED'];
+        if (!allowed.includes(reviewStatus)) {
+          return res.status(400).json({ error: 'Status inválido' });
+        }
+        data.reviewStatus = reviewStatus;
+      }
+      if (sellerResponse !== undefined) {
+        data.sellerResponse = sellerResponse ? sanitizeString(sellerResponse, 2000) : null;
+      }
+
+      const updated = await prisma.chat.update({
+        where: { id: chatId },
+        data,
+        include: {
+          order: {
+            include: {
+              user: { select: { id: true, name: true, email: true, image: true } },
+              items: {
+                include: {
+                  product: {
+                    select: { id: true, name: true, imageUrl: true, price: true, slug: true },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+
+      return res.json(updated);
+    } catch (err) {
+      console.error('[ChatController.updateChatReview]', err);
+      return res.status(500).json({ error: 'Erro ao atualizar avaliação' });
+    }
+  }
+
+  async deleteChatReview(req, res) {
+    try {
+      if (!req.user.isAdmin) return res.status(403).json({ error: 'Acesso negado' });
+      const { chatId } = req.params;
+
+      const updated = await prisma.chat.update({
+        where: { id: chatId },
+        data: {
+          rating: null,
+          ratingComment: null,
+          ratingTags: null,
+          isAnonymousRating: false,
+          reviewStatus: null,
+          sellerResponse: null,
+        },
+      });
+
+      return res.json(updated);
+    } catch (err) {
+      console.error('[ChatController.deleteChatReview]', err);
+      return res.status(500).json({ error: 'Erro ao excluir avaliação' });
+    }
+  }
+
+  async listPublishedStoreReviews(req, res) {
+    try {
+      const reviews = await prisma.chat.findMany({
+        where: { rating: { not: null }, reviewStatus: 'PUBLISHED' },
+        include: {
+          order: {
+            include: {
+              user: { select: { id: true, name: true, email: true, image: true } },
+              items: {
+                include: {
+                  product: {
+                    select: { id: true, name: true, imageUrl: true, price: true, slug: true },
+                  },
+                },
+              },
+            },
+          },
+        },
+        orderBy: { updatedAt: 'desc' },
+        take: 30,
+      });
+
+      const payload = reviews.map((review) => {
+        const product = review.order?.items?.[0]?.product;
+        const customer = review.isAnonymousRating
+          ? 'Cliente verificado'
+          : (review.order?.user?.name || review.order?.user?.email || 'Cliente');
+
+        return {
+          id: review.id,
+          name: customer,
+          avatarUrl: review.isAnonymousRating ? null : review.order?.user?.image || null,
+          rating: review.rating,
+          comment: review.ratingComment || '',
+          tags: Array.isArray(review.ratingTags) ? review.ratingTags : [],
+          sellerResponse: review.sellerResponse,
+          dateLabel: review.updatedAt,
+          product: product
+            ? {
+                id: product.id,
+                name: product.name,
+                imageUrl: product.imageUrl,
+                price: Number(product.price),
+                slug: product.slug,
+              }
+            : null,
+        };
+      });
+
+      return res.json({ reviews: payload });
+    } catch (err) {
+      console.error('[ChatController.listPublishedStoreReviews]', err);
       return res.status(500).json({ error: 'Erro ao listar avaliações' });
     }
   }

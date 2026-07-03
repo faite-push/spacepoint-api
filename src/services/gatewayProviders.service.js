@@ -7,6 +7,7 @@ const {
 } = require('../config/pagbank.config');
 const { resolveEfiCertificate } = require('./gatewayValidation.service');
 const { fulfillPaidOrder, notifyOrderChatCreated } = require('./orderFulfillment.service');
+const { resolveCustomerFromOrder } = require('../utils/checkoutConfig');
 
 const PIX_EXPIRATION_SECONDS = 30 * 60;
 const PROVIDER_SLUGS = ['efi-bank', 'mercado-pago', 'pagbank', 'stripe'];
@@ -128,7 +129,7 @@ async function createEfiPix(order, gateway) {
 async function createMercadoPagoPix(order, gateway) {
   const config = getConfig(gateway);
   const accessToken = config.accessToken || config.access_token;
-  const payerEmail = order.user?.email || order.customerEmail || 'cliente@spacepoint.com';
+  const { customerEmail: payerEmail } = resolveCustomerFromOrder(order);
   const idempotencyKey = `pix-${order.id}-${Date.now()}`;
 
   let data;
@@ -186,15 +187,14 @@ async function createPagBankPix(order, gateway) {
   const token = await getPagBankToken(config);
   const baseUrl = creds.baseUrl;
 
-  const customerName = order.user?.name || order.customerName || 'Cliente';
-  const customerEmail = order.user?.email || order.customerEmail || 'cliente@spacepoint.com';
+  const { customerName, customerEmail, customerCpf } = resolveCustomerFromOrder(order);
 
   const orderPayload = {
     reference_id: order.id,
     customer: {
       name: customerName.slice(0, 80),
       email: customerEmail,
-      tax_id: "12345678909", // Default for sandbox/tests if not available
+      tax_id: customerCpf && customerCpf.length === 11 ? customerCpf : '12345678909',
     },
     items: (order.items || []).length
       ? (order.items || []).map((item, idx) => ({
@@ -260,8 +260,7 @@ async function createStripePix(order, gateway) {
   const config = getConfig(gateway);
   const secretKey = config.secretKey || config.secret_key;
 
-  const customerName = order.user?.name || order.customerName || 'Cliente';
-  const customerEmail = order.user?.email || order.customerEmail || 'cliente@spacepoint.com';
+  const { customerName, customerEmail } = resolveCustomerFromOrder(order);
 
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
   const returnUrl = `${frontendUrl}/orders/${order.id}`;
@@ -316,7 +315,7 @@ async function createStripeCard(order, gateway) {
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
   const successUrl = `${frontendUrl}/checkout/payment/${order.id}?card=success`;
   const cancelUrl = `${frontendUrl}/checkout/payment/${order.id}?card=cancel`;
-  const customerEmail = order.user?.email || order.customerEmail || undefined;
+  const { customerEmail } = resolveCustomerFromOrder(order);
 
   const params = new URLSearchParams();
   params.append('mode', 'payment');
@@ -449,15 +448,14 @@ async function createPagBankCard(order, gateway) {
   const token = await getPagBankToken(config);
   const baseUrl = creds.baseUrl;
 
-  const customerName = order.user?.name || order.customerName || 'Cliente';
-  const customerEmail = order.user?.email || order.customerEmail || 'cliente@spacepoint.com';
+  const { customerName, customerEmail, customerCpf } = resolveCustomerFromOrder(order);
 
   const payload = {
     reference_id: order.id,
     customer: {
       name: customerName.slice(0, 80),
       email: customerEmail,
-      tax_id: "12345678909",
+      tax_id: customerCpf && customerCpf.length === 11 ? customerCpf : '12345678909',
     },
     items: (order.items || []).length
       ? (order.items || []).map((item, idx) => ({

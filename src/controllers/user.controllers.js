@@ -1,4 +1,5 @@
 const { prisma } = require('../config/prisma');
+const { isSuperOwner } = require('../utils/auth');
 
 class UserController {
   /**
@@ -15,10 +16,22 @@ class UserController {
           provider: true,
           isAdmin: true,
           createdAt: true,
+          roleId: true,
+          role: {
+            select: {
+              id: true,
+              name: true,
+              isProtected: true,
+            },
+          },
         },
         orderBy: { createdAt: 'desc' },
       });
-      return res.json({ success: true, count: users.length, users });
+      const formatted = users.map((user) => ({
+        ...user,
+        isSuperOwner: isSuperOwner(user.email),
+      }));
+      return res.json({ success: true, count: formatted.length, users: formatted });
     } catch (err) {
       console.error('[getAllUsers]', err.message);
       return res.status(500).json({ error: 'Erro interno ao buscar usuários' });

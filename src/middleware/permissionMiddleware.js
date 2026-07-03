@@ -54,4 +54,56 @@ const requirePermission = (permissionKey) => {
   };
 };
 
+/**
+ * Permite acesso se o usuário tiver pelo menos uma das permissões informadas.
+ */
+const requireAnyPermission = (...permissionKeys) => {
+  return async (req, res, next) => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) {
+        return res.status(401).json({ error: 'Não autenticado' });
+      }
+
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        include: {
+          role: {
+            include: {
+              permissions: true,
+            },
+          },
+        },
+      });
+
+      if (!user) {
+        return res.status(404).json({ error: 'Usuário não encontrado' });
+      }
+
+      if (isSuperOwner(user.email)) {
+        return next();
+      }
+
+      if (!user.role) {
+        return res.status(403).json({ error: 'Acesso negado: você não possui um cargo atribuído' });
+      }
+
+      const userKeys = new Set(user.role.permissions.map((p) => p.key));
+      const allowed = permissionKeys.some((key) => userKeys.has(key));
+
+      if (!allowed) {
+        return res.status(403).json({
+          error: `Acesso negado: falta uma das permissões (${permissionKeys.join(', ')})`,
+        });
+      }
+
+      next();
+    } catch (err) {
+      console.error(`[requireAnyPermission: ${permissionKeys.join('|')}]`, err.message);
+      return res.status(500).json({ error: 'Erro ao verificar permissão' });
+    }
+  };
+};
+
 module.exports = requirePermission;
+module.exports.any = requireAnyPermission;

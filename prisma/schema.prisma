@@ -8,7 +8,7 @@ datasource db {
 }
 
 model User {
-  id           String        @id @default(cuid())
+  id           String        @id
   name         String?
   email        String?       @unique
   image        String?
@@ -33,13 +33,14 @@ model User {
 }
 
 model Category {
-  id              String     @id @default(cuid())
+  id              String     @id
   name            String
   slug            String     @unique
   parentId        String?
   imageUrl        String?
   bannerUrl       String?
   showInNavbar    Boolean    @default(false)
+  showInFooter    Boolean    @default(false)
   sortOrder       Int        @default(0)
   isActive        Boolean    @default(true)
   metaTitle       String?
@@ -53,10 +54,11 @@ model Category {
   @@index([parentId])
   @@index([slug])
   @@index([showInNavbar, isActive])
+  @@index([showInFooter, isActive])
 }
 
 model Product {
-  id                       String           @id @default(cuid())
+  id                       String           @id
   slug                     String           @unique
   name                     String
   description              Json?
@@ -89,6 +91,7 @@ model Product {
   category                 Category?        @relation(fields: [categoryId], references: [id])
   codes                    ProductCode[]
   variants                 ProductVariant[]
+  showcaseSections         HomeShowcaseSectionProduct[]
 
   @@index([slug])
   @@index([categoryId])
@@ -97,7 +100,7 @@ model Product {
 }
 
 model ProductVariant {
-  id                       String        @id @default(cuid())
+  id                       String        @id
   productId                String
   sku                      String?
   name                     String
@@ -146,7 +149,7 @@ model ProductCode {
 }
 
 model Order {
-  id               String       @id @default(cuid())
+  id               String       @id
   userId           String
   status           String       @default("PENDING")
   total            Int
@@ -161,6 +164,8 @@ model Order {
   paymentMethod    String?
   couponCode       String?
   checkoutData     Json?
+  deliveryOption   String?      @default("standard")
+  deliveryFee      Int          @default(0)
   clientIp         String?
   userAgent        String?
   chat             Chat?
@@ -273,6 +278,7 @@ model SiteConfig {
   chatWelcomeMessage          String?
   chatAutomatedMessages       String?
   pluginsConfig               Json?
+  reviewsSettings             Json?
 }
 
 model InstitutionalPage {
@@ -311,6 +317,33 @@ model HomeReview {
   updatedAt   DateTime @updatedAt
 
   @@index([isPublished, sortOrder])
+}
+
+model HomeShowcaseSection {
+  id        String                       @id @default(cuid())
+  title     String
+  subtitle  String?
+  enabled   Boolean                      @default(true)
+  sortOrder Int                          @default(0)
+  maxItems  Int                          @default(12)
+  createdAt DateTime                     @default(now())
+  updatedAt DateTime                     @updatedAt
+  products  HomeShowcaseSectionProduct[]
+
+  @@index([enabled, sortOrder])
+}
+
+model HomeShowcaseSectionProduct {
+  id        String              @id @default(cuid())
+  sectionId String
+  productId String
+  sortOrder Int                 @default(0)
+  section   HomeShowcaseSection @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  product   Product             @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([sectionId, productId])
+  @@index([sectionId, sortOrder])
+  @@index([productId])
 }
 
 model Payment {
@@ -455,6 +488,8 @@ model Chat {
   ratingComment        String?
   ratingTags           Json?
   isAnonymousRating    Boolean       @default(false)
+  reviewStatus         String?
+  sellerResponse       String?
   assignedToId         String?
   firstAdminResponseAt DateTime?
   createdAt            DateTime      @default(now())
@@ -467,15 +502,18 @@ model Chat {
 }
 
 model ChatMessage {
-  id        String   @id @default(cuid())
-  chatId    String
-  senderId  String
-  content   String
-  type      String   @default("TEXT")
-  fileUrl   String?
-  isPinned  Boolean  @default(false)
-  createdAt DateTime @default(now())
-  chat      Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  id         String   @id @default(cuid())
+  chatId     String
+  senderId   String
+  senderName       String?
+  senderRole       String?
+  senderStaffTitle String?
+  content    String
+  type       String   @default("TEXT")
+  fileUrl    String?
+  isPinned   Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  chat       Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
 }
 
 model ChatLabel {

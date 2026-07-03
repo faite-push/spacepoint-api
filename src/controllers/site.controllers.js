@@ -1,6 +1,7 @@
 const { prisma } = require('../config/prisma');
 const { resolveEntityMedia } = require('../utils/mediaUrl');
 const { normalizeCheckoutSettings } = require('../utils/checkoutConfig');
+const { normalizeReviewsSettings } = require('../utils/reviewsSettings');
 
 function sanitizePublicPluginsConfig(pluginsConfig) {
   if (!pluginsConfig || typeof pluginsConfig !== 'object' || Array.isArray(pluginsConfig)) {
@@ -38,6 +39,7 @@ class SiteController {
     return res.json({
       ...publicConfig,
       checkoutSettings: normalizeCheckoutSettings(config.checkoutSettings),
+      reviewsSettings: normalizeReviewsSettings(config.reviewsSettings),
       pluginsConfig: sanitizePublicPluginsConfig(config.pluginsConfig),
     });
   }
@@ -61,16 +63,8 @@ class SiteController {
   }
 
   async getHome(req, res) {
-    const { mapProductsForStore, visibleVariantWhere } = require('../utils/productStore');
-    const featuredRows = await prisma.product.findMany({
-      where: { isActive: true, isVisible: true, featured: true },
-      orderBy: { createdAt: 'desc' },
-      take: 12,
-      include: {
-        variants: { where: visibleVariantWhere(), orderBy: { sortOrder: 'asc' } },
-      },
-    });
-    const featured = await mapProductsForStore(prisma, featuredRows, req);
+    const { loadPublicSections } = require('../controllers/homeShowcase.controllers');
+    const sections = await loadPublicSections(req);
 
     const banners = await prisma.banner.findMany({
       where: { isActive: true },
@@ -78,7 +72,8 @@ class SiteController {
     });
 
     return res.json({
-      featured,
+      sections,
+      featured: sections[0]?.products || [],
       banners: banners.map((banner) => resolveEntityMedia(banner, req)),
     });
   }

@@ -277,6 +277,11 @@ class SiteAdminController {
             : null;
       }
 
+      if (body.reviewsSettings !== undefined) {
+        const { normalizeReviewsSettings } = require('../utils/reviewsSettings');
+        data.reviewsSettings = normalizeReviewsSettings(body.reviewsSettings);
+      }
+
       const config = await prisma.siteConfig.upsert({
         where: { id: 'default' },
         update: data,

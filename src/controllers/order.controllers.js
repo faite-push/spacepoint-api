@@ -3,6 +3,11 @@ const { sanitizeString } = require('../utils/sanitize');
 const { resolveSellable } = require('../utils/productStore');
 const { validateCouponForOrder, recordCouponUsage } = require('../services/coupon.service');
 const {
+  normalizeCheckoutSettings,
+  validateCheckoutData,
+} = require('../utils/checkoutConfig');
+const { getRequiredFieldsForCheckout } = require('../config/gatewayCapabilities');
+const {
   ORDER_PAYMENT_TTL_MS,
   reserveStockForOrderItem,
   fulfillPaidOrder,
@@ -18,7 +23,8 @@ const {
 class OrderController {
   async paymentOptions(req, res) {
     try {
-      const options = await getCheckoutPaymentOptions();
+      const paymentMethod = String(req.query.paymentMethod || 'PIX').trim().toUpperCase();
+      const options = await getCheckoutPaymentOptions(paymentMethod);
       return res.json(options);
     } catch (err) {
       return res.status(400).json({ error: err.message || 'Falha ao carregar formas de pagamento' });
@@ -34,9 +40,39 @@ class OrderController {
       const items = Array.isArray(req.body.items) ? req.body.items : [];
       const couponCode = sanitizeString(req.body.couponCode || '', 64) || null;
       const paymentMethod = String(req.body.paymentMethod || 'PIX').trim().toUpperCase();
+      const deliveryOption = String(req.body.deliveryOption || 'standard').trim().toLowerCase();
 
       if (!items.length || items.length > 20) {
         return res.status(400).json({ error: 'Carrinho inválido' });
+      }
+
+      const siteConfig = await prisma.siteConfig.findUnique({ where: { id: 'default' } });
+      const checkoutSettings = normalizeCheckoutSettings(siteConfig?.checkoutSettings);
+      const paymentOptions = await getCheckoutPaymentOptions(paymentMethod);
+      const requiredFields = getRequiredFieldsForCheckout(
+        paymentOptions.pixGateway,
+        paymentOptions.cardGateway,
+        paymentMethod
+      );
+
+      const checkoutErrors = validateCheckoutData(
+        checkoutSettings,
+        req.body.checkoutData,
+        requiredFields
+      );
+      if (checkoutErrors.length) {
+        return res.status(400).json({ error: checkoutErrors[0] });
+      }
+
+      const deliveryConfig = checkoutSettings.deliveryOptions || {};
+      let deliveryFee = 0;
+      if (deliveryOption === 'express') {
+        if (!deliveryConfig.enabled) {
+          return res.status(400).json({ error: 'Entrega expressa indisponível' });
+        }
+        deliveryFee = Math.max(0, Number(deliveryConfig.expressFeeCents) || 0);
+      } else if (deliveryOption !== 'standard') {
+        return res.status(400).json({ error: 'Opção de entrega inválida' });
       }
 
       const normalizedItems = items
@@ -105,20 +141,27 @@ class OrderController {
           paymentMethod,
         });
 
-        const total = Math.max(0, subtotal - discountCents);
+        const total = Math.max(0, subtotal - discountCents + deliveryFee);
         const paymentExpiresAt = new Date(Date.now() + ORDER_PAYMENT_TTL_MS);
+        const adminNotes =
+          deliveryOption === 'express'
+            ? '[ENTREGA EXPRESSA] Priorizar atendimento e entrega deste pedido.'
+            : null;
 
         const created = await tx.order.create({
           data: {
             userId,
             subtotal,
             discount: discountCents,
+            deliveryFee,
+            deliveryOption,
             total,
             idempotencyKey,
             paymentExpiresAt,
             paymentMethod,
             couponCode,
             checkoutData: req.body.checkoutData || null,
+            adminNotes,
             clientIp: req.ip || req.headers['x-forwarded-for']?.split(',')[0]?.trim() || null,
             userAgent: sanitizeString(req.headers['user-agent'] || '', 512) || null,
             items: { create: orderItemsData },
@@ -359,6 +402,8 @@ class OrderController {
         subtotal: order.subtotal,
         discount: order.discount,
         total: order.total,
+        deliveryOption: order.deliveryOption,
+        deliveryFee: order.deliveryFee,
         customerName: order.user?.name || 'Cliente',
         customerEmail: order.user?.email || 'N/A',
         customerImage: order.user?.image,
@@ -419,6 +464,21 @@ class OrderController {
 
         if (status === 'CANCELLED') {
           return cancelOrder(tx, id, 'Cancelado pelo administrador');
+        }
+
+        if (status === 'DELIVERED') {
+          const current = await tx.order.findUnique({ where: { id }, include: { items: true } });
+          if (!current) throw new Error('Pedido não encontrado');
+          if (!['PAID', 'DELIVERED'].includes(current.status)) {
+            await fulfillPaidOrder(tx, id, {
+              provider: 'manual-admin',
+              description: 'Pagamento aprovado via admin',
+            });
+          }
+          return tx.order.update({
+            where: { id },
+            data: { status: 'DELIVERED' },
+          });
         }
 
         return tx.order.update({

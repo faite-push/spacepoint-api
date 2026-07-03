@@ -5,7 +5,7 @@ const requireAdmin = require('../middleware/adminMiddleware');
 const requirePermission = require('../middleware/permissionMiddleware');
 
 const router = Router();
-const guard = [authenticate, requireAdmin, requirePermission('settings:manage')];
+const guard = [authenticate, requireAdmin, requirePermission('pages:manage')];
 
 router.get('/v2/api/home-reviews', HomeReviewController.listPublic.bind(HomeReviewController));
 router.get('/v2/api/page-seo/:pageKey', HomeReviewController.getPageSeoPublic.bind(HomeReviewController));

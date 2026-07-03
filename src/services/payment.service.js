@@ -1,6 +1,7 @@
 const { prisma } = require('../config/prisma');
 const {
   getGatewayActiveMethods,
+  getRequiredFieldsForCheckout,
 } = require('../config/gatewayCapabilities');
 const {
   createPixCharge,
@@ -115,18 +116,27 @@ async function createDevMockPix(order) {
   return metadata;
 }
 
-async function getCheckoutPaymentOptions() {
+async function getCheckoutPaymentOptions(paymentMethod = 'PIX') {
   const pixGateway = await resolveActivePixGateway();
   const cardGateway = await resolveActiveCardGateway();
   const methods = [];
   if (pixGateway) methods.push('PIX');
   if (cardGateway) methods.push('CARD');
 
+  const pixSlug = pixGateway?.slug || null;
+  const cardSlug = cardGateway?.slug || null;
+  const requiredCustomerFields = getRequiredFieldsForCheckout(pixSlug, cardSlug, paymentMethod);
+
   return {
-    pixGateway: pixGateway?.slug || null,
-    cardGateway: cardGateway?.slug || null,
-    gateway: pixGateway?.slug || cardGateway?.slug || null,
+    pixGateway: pixSlug,
+    cardGateway: cardSlug,
+    gateway: pixSlug || cardSlug || null,
     methods: methods.length ? methods : ['PIX'],
+    requiredCustomerFields,
+    requiredFieldsByMethod: {
+      PIX: getRequiredFieldsForCheckout(pixSlug, cardSlug, 'PIX'),
+      CARD: getRequiredFieldsForCheckout(pixSlug, cardSlug, 'CARD'),
+    },
   };
 }
 

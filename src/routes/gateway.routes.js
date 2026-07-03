@@ -7,7 +7,7 @@ const requirePermission = require('../middleware/permissionMiddleware');
 
 const GatewayController = require('../controllers/gateway.controllers');
 
-const guard = [authenticate, requireAdmin, requirePermission('settings:manage')];
+const guard = [authenticate, requireAdmin, requirePermission('gateways:manage')];
 
 router.get('/v2/api/admin/gateways', ...guard, GatewayController.list);
 router.post('/v2/api/admin/gateways/:slug/validate', ...guard, GatewayController.validate);

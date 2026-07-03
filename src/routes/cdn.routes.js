@@ -4,6 +4,7 @@ const multer = require('multer');
 
 const requireAdmin = require('../middleware/adminMiddleware');
 const authenticate = require('../middleware/authMiddleware');
+const requirePermission = require('../middleware/permissionMiddleware');
 
 const CdnController = require('../controllers/cdn.controllers');
 
@@ -23,7 +24,7 @@ router.post('/v1/cdn/upload/chat', authenticate, chatUpload.single('file'), CdnC
 router.delete('/v1/cdn/:filename', authenticate, requireAdmin, CdnController.deleteFile);
 
 // Admin Gallery Endpoints
-router.get('/v2/api/admin/media', authenticate, requireAdmin, CdnController.listMedia);
-router.delete('/v2/api/admin/media/:filename', authenticate, requireAdmin, CdnController.deleteFile);
+router.get('/v2/api/admin/media', authenticate, requireAdmin, requirePermission('media:view'), CdnController.listMedia);
+router.delete('/v2/api/admin/media/:filename', authenticate, requireAdmin, requirePermission('media:manage'), CdnController.deleteFile);
 
 module.exports = router;

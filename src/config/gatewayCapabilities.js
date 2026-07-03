@@ -8,8 +8,30 @@ const GATEWAY_CAPABILITIES = {
   stripe: { methods: ['CARD'], label: 'Stripe' },
 };
 
+/** Campos de cliente exigidos por gateway/método (chaves do checkoutData) */
+const GATEWAY_CUSTOMER_FIELDS = {
+  'efi-bank': { PIX: [], CARD: [] },
+  'mercado-pago': { PIX: ['email'], CARD: ['email', 'name'] },
+  pagbank: { PIX: ['name', 'email', 'cpf'], CARD: ['name', 'email', 'cpf'] },
+  stripe: { PIX: ['email', 'name'], CARD: ['email', 'name'] },
+};
+
 function normalizeSlug(slug) {
   return slug === 'efi-pix' ? 'efi-bank' : slug;
+}
+
+function getGatewayRequiredFields(slug, method) {
+  const key = normalizeSlug(slug);
+  const normalizedMethod = String(method || 'PIX').trim().toUpperCase();
+  const map = GATEWAY_CUSTOMER_FIELDS[key] || {};
+  return map[normalizedMethod] || [];
+}
+
+function getRequiredFieldsForCheckout(pixGatewaySlug, cardGatewaySlug, paymentMethod) {
+  const method = String(paymentMethod || 'PIX').trim().toUpperCase();
+  const slug = method === 'CARD' ? cardGatewaySlug : pixGatewaySlug;
+  if (!slug) return [];
+  return getGatewayRequiredFields(slug, method);
 }
 
 function getSupportedMethods(slug) {
@@ -55,9 +77,12 @@ function hasAnyActiveMethod(gateway) {
 module.exports = {
   GATEWAY_SLUGS,
   GATEWAY_CAPABILITIES,
+  GATEWAY_CUSTOMER_FIELDS,
   normalizeSlug,
   getSupportedMethods,
   supportsMethod,
   getGatewayActiveMethods,
   hasAnyActiveMethod,
+  getGatewayRequiredFields,
+  getRequiredFieldsForCheckout,
 };

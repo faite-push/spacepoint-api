@@ -1,33 +1,5 @@
 const { prisma } = require('../config/prisma');
-
-// ─── Permissions List ───────────────────────────────────────────────────────
-
-const ALL_PERMISSIONS = [
-  // Products
-  { key: 'products:view', name: 'Ver Produtos', category: 'products' },
-  { key: 'products:create', name: 'Criar Produtos', category: 'products' },
-  { key: 'products:edit', name: 'Editar Produtos', category: 'products' },
-  { key: 'products:delete', name: 'Excluir Produtos', category: 'products' },
-  // Codes
-  { key: 'codes:view', name: 'Ver Códigos', category: 'codes' },
-  { key: 'codes:upload', name: 'Upload de Códigos', category: 'codes' },
-  { key: 'codes:delete', name: 'Excluir Códigos', category: 'codes' },
-  // Orders
-  { key: 'orders:view', name: 'Ver Pedidos', category: 'orders' },
-  { key: 'orders:manage', name: 'Gerenciar Pedidos', category: 'orders' },
-  { key: 'orders:refund', name: 'Reembolsar Pedidos', category: 'orders' },
-  // Users
-  { key: 'users:view', name: 'Ver Usuários', category: 'users' },
-  { key: 'users:edit', name: 'Editar Usuários', category: 'users' },
-  { key: 'users:ban', name: 'Banir/Desbanir Usuários', category: 'users' },
-  // Roles
-  { key: 'roles:view', name: 'Ver Cargos', category: 'roles' },
-  { key: 'roles:manage', name: 'Gerenciar Cargos', category: 'roles' },
-  // Settings
-  { key: 'settings:manage', name: 'Gerenciar Configurações', category: 'settings' },
-  // Analytics
-  { key: 'analytics:view', name: 'Ver Analytics', category: 'analytics' },
-];
+const { ALL_PERMISSIONS } = require('../config/permissions');
 
 const { isSuperOwner } = require('../utils/auth');
 
