@@ -32,7 +32,7 @@ const upsertUser = async ({ provider, providerId, name, email, image }) => {
   return prisma.user.upsert({
     where,
     update: { name, image },
-    create: data,
+    create: { id: crypto.randomUUID(), ...data },
   });
 };
 
@@ -273,6 +273,7 @@ class AuthController {
         // Criar novo usuário
         user = await prisma.user.create({
           data: {
+            id: crypto.randomUUID(),
             email,
             name: email.split('@')[0],
             provider: 'local',

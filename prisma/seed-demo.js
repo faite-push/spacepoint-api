@@ -1,4 +1,5 @@
 const { PrismaClient } = require('@prisma/client');
+const crypto = require('crypto');
 const prisma = new PrismaClient();
 
 async function main() {
@@ -24,6 +25,7 @@ async function main() {
       where: { email: u.email },
       update: {},
       create: { 
+        id: crypto.randomUUID(),
         name: u.name,
         email: u.email,
         provider: 'local',

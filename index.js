@@ -104,7 +104,9 @@ const http = require('http');
 const server = http.createServer(app);
 const socketService = require('./src/services/websocket.service');
 
-socketService.init(server, allowedOrigins);
+socketService.init(server, allowedOrigins).catch((err) => {
+  console.error('[SOCKET] Falha ao iniciar:', err.message);
+});
 
 server.listen({
   host: "0.0.0.0",

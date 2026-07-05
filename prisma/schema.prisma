@@ -8,7 +8,7 @@ datasource db {
 }
 
 model User {
-  id           String        @id
+  id           String        @id @default(cuid())
   name         String?
   email        String?       @unique
   image        String?
@@ -484,6 +484,7 @@ model Chat {
   status               String        @default("OPEN")
   isArchived           Boolean       @default(false)
   isResolved           Boolean       @default(false)
+  unreadCount          Int           @default(0)
   rating               Int?
   ratingComment        String?
   ratingTags           Json?
@@ -514,6 +515,9 @@ model ChatMessage {
   isPinned   Boolean  @default(false)
   createdAt  DateTime @default(now())
   chat       Chat     @relation(fields: [chatId], references: [id], onDelete: Cascade)
+
+  @@index([chatId, createdAt])
+  @@index([chatId, senderId])
 }
 
 model ChatLabel {

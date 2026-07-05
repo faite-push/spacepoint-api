@@ -5,7 +5,19 @@ const { initializeChatForPaidOrder } = require('../services/chat.service');
 const { randomBytes } = require('crypto');
 const socketService = require('../services/websocket.service');
 const { syncAutomaticStockFromCodes } = require('../utils/digitalStock');
+const { syncUnreadCount, resetUnreadCount, setInitialUnreadCount, fetchChatMessages } = require('../services/chatUnread.service');
 const { getReviewsSettings } = require('../utils/reviewsSettings');
+
+const ORDER_LIST_INCLUDE = {
+  user: { select: { id: true, name: true, email: true, image: true } },
+  items: {
+    select: {
+      id: true,
+      quantity: true,
+      codes: { where: { status: 'DELIVERED' }, select: { id: true, status: true } },
+    },
+  },
+};
 
 const ORDER_INCLUDE = {
   user: { select: { id: true, name: true, email: true, image: true } },
@@ -103,7 +115,6 @@ class ChatController {
       let chat = await prisma.chat.findUnique({
         where: { orderId: order.id },
         include: {
-          messages: { orderBy: { createdAt: 'asc' } },
           labels: true,
           assignedTo: { select: { id: true, name: true, email: true, image: true } },
           order: { include: ORDER_INCLUDE },
@@ -117,7 +128,6 @@ class ChatController {
             return tx.chat.findUnique({
               where: { orderId: order.id },
               include: {
-                messages: { orderBy: { createdAt: 'asc' } },
                 labels: true,
                 order: { include: ORDER_INCLUDE },
               },
@@ -127,13 +137,19 @@ class ChatController {
           chat = await prisma.chat.create({
             data: { orderId: order.id },
             include: {
-              messages: true,
               labels: true,
               order: { include: ORDER_INCLUDE },
             },
           });
         }
       }
+
+      const messageLimit = Math.min(Math.max(Number(req.query.messageLimit) || 50, 1), 100);
+      const before = typeof req.query.before === 'string' ? req.query.before : undefined;
+      const { messages, hasMore } = await fetchChatMessages(chat.id, {
+        before,
+        limit: messageLimit,
+      });
 
       const userStats = await prisma.order.aggregate({
         where: { userId: chat.order.userId, status: { in: ['PAID', 'DELIVERED'] } },
@@ -148,6 +164,11 @@ class ChatController {
 
       const response = {
         ...chat,
+        messages,
+        messagesMeta: {
+          hasMore,
+          oldestId: messages[0]?.id ?? null,
+        },
         userStats: {
           totalSpent: userStats._sum.total || 0,
           ordersCount: userStats._count.id || 0,
@@ -421,6 +442,12 @@ class ChatController {
         },
       });
 
+      let unreadCount = chat.unreadCount ?? 0;
+
+      if (!isStaffMessage) {
+        unreadCount = await syncUnreadCount(chatId);
+      }
+
       await prisma.chat.update({
         where: { id: chatId },
         data: { updatedAt: new Date() },
@@ -443,12 +470,51 @@ class ChatController {
       socketService.broadcastNewMessage(chatId, chat.order.userId, message, isStaffMessage, {
         orderId: chat.orderId,
         customerName,
+        unreadCount,
       });
 
       return res.status(201).json(message);
     } catch (err) {
       console.error('[ChatController.sendMessage]', err);
       return res.status(500).json({ error: 'Erro ao enviar mensagem' });
+    }
+  }
+
+  async listMessages(req, res) {
+    try {
+      const { orderId } = req.params;
+      const userId = req.user.id;
+      const isAdmin = req.user.isAdmin;
+
+      const order = await prisma.order.findUnique({
+        where: { id: orderId },
+        select: { userId: true },
+      });
+      if (!order) return res.status(404).json({ error: 'Pedido não encontrado' });
+      if (!isAdmin && order.userId !== userId) {
+        return res.status(403).json({ error: 'Acesso negado' });
+      }
+
+      const chat = await prisma.chat.findUnique({
+        where: { orderId },
+        select: { id: true },
+      });
+      if (!chat) return res.status(404).json({ error: 'Chat não encontrado' });
+
+      const before = typeof req.query.before === 'string' ? req.query.before : undefined;
+      const limit = req.query.limit;
+      const result = await fetchChatMessages(chat.id, { before, limit });
+
+      return res.json({
+        messages: result.messages,
+        messagesMeta: {
+          hasMore: result.hasMore,
+          oldestId: result.messages[0]?.id ?? null,
+        },
+      });
+    } catch (err) {
+      console.error('[ChatController.listMessages]', err);
+      return res.status(500).json({ error: 'Erro ao carregar mensagens' });
     }
   }
 
@@ -469,6 +535,13 @@ class ChatController {
       } else if (status === 'OPEN') {
         where.status = 'OPEN';
         where.isArchived = false;
+      } else if (status === 'EXPRESS') {
+        where.order = {
+          OR: [
+            { deliveryOption: 'express' },
+            { adminNotes: { contains: 'ENTREGA EXPRESSA', mode: 'insensitive' } },
+          ],
+        };
       } else if (status && status !== 'ALL') {
         where.status = status;
       }
@@ -497,18 +570,7 @@ class ChatController {
         prisma.chat.findMany({
           where,
           include: {
-            order: {
-              include: {
-                user: { select: { id: true, name: true, email: true, image: true } },
-                items: {
-                  include: {
-                    product: { select: { name: true, imageUrl: true, deliveryType: true } },
-                    variant: { select: { deliveryType: true } },
-                    codes: { where: { status: 'DELIVERED' }, select: { id: true, code: true, status: true } },
-                  },
-                },
-              },
-            },
+            order: { include: ORDER_LIST_INCLUDE },
             messages: {
               orderBy: { createdAt: 'desc' },
               take: 1,
@@ -522,46 +584,12 @@ class ChatController {
         prisma.chat.count({ where }),
       ]);
 
-      const chatsWithUnread = await Promise.all(
-        chats.map(async (chat) => {
-          const unreadWhere = {
-            chatId: chat.id,
-            senderId: { notIn: ['ADMIN', 'SYSTEM'] },
-          };
-          if (chat.lastAdminReadAt) {
-            unreadWhere.createdAt = { gt: chat.lastAdminReadAt };
-          }
-          let unreadCount = await prisma.chatMessage.count({ where: unreadWhere });
-
-          // Nova compra: chat nunca aberto pelo admin conta como 1 não lido
-          if (unreadCount === 0 && !chat.lastAdminReadAt) {
-            const hasMessages = await prisma.chatMessage.findFirst({
-              where: { chatId: chat.id },
-              select: { id: true },
-            });
-            if (hasMessages) unreadCount = 1;
-          }
-
-          // Reabertura pelo cliente após admin já ter lido
-          if (unreadCount === 0 && chat.lastAdminReadAt) {
-            const reopenAfterRead = await prisma.chatMessage.findFirst({
-              where: {
-                chatId: chat.id,
-                senderId: 'SYSTEM',
-                type: 'AUTOMATED',
-                content: { contains: 'reabriu' },
-                createdAt: { gt: chat.lastAdminReadAt },
-              },
-              select: { id: true },
-            });
-            if (reopenAfterRead) unreadCount = 1;
-          }
-
-          return { ...chat, unreadCount };
-        })
-      );
-
-      return res.json({ chats: chatsWithUnread, total, page: Number(page), totalPages: Math.ceil(total / pageSize) });
+      return res.json({
+        chats,
+        total,
+        page: Number(page),
+        totalPages: Math.ceil(total / pageSize),
+      });
     } catch (err) {
       console.error('[ChatController.listChats]', err);
       return res.status(500).json({ error: 'Erro ao listar chats' });
@@ -657,7 +685,7 @@ class ChatController {
 
       const chat = await prisma.chat.update({
         where: { id: chatId },
-        data: { lastAdminReadAt: new Date() },
+        data: { lastAdminReadAt: new Date(), unreadCount: 0 },
         include: { order: { select: { userId: true } } },
       });
 
@@ -674,7 +702,7 @@ class ChatController {
         id: chat.id,
         lastAdminReadAt: chat.lastAdminReadAt,
       });
-      socketService.emitToAdmins('chat_list_update', { chatId });
+      socketService.emitToAdmins('chat_list_update', { chatId, unreadCount: 0 });
 
       return res.json({ success: true, lastAdminReadAt: chat.lastAdminReadAt });
     } catch (err) {
@@ -740,6 +768,22 @@ class ChatController {
   async createLabel(req, res) {
     try {
       const { name, color, references } = req.body;
+
+      if (Array.isArray(references) && references.length) {
+        for (const ref of references) {
+          if (ref.type === 'PRODUCT') {
+            const product = await prisma.product.findUnique({ where: { id: ref.referenceId }, select: { id: true } });
+            if (!product) return res.status(400).json({ error: `Produto não encontrado: ${ref.referenceId}` });
+          } else if (ref.type === 'CATEGORY') {
+            const category = await prisma.category.findUnique({ where: { id: ref.referenceId }, select: { id: true } });
+            if (!category) return res.status(400).json({ error: `Categoria não encontrada: ${ref.referenceId}` });
+          } else if (ref.type === 'VARIANT') {
+            const variant = await prisma.productVariant.findUnique({ where: { id: ref.referenceId }, select: { id: true } });
+            if (!variant) return res.status(400).json({ error: `Variante não encontrada: ${ref.referenceId}` });
+          }
+        }
+      }
+
       const label = await prisma.chatLabel.create({
         data: {
           name: sanitizeString(name, 64),
@@ -771,6 +815,21 @@ class ChatController {
       if (color !== undefined) data.color = color;
 
       if (references !== undefined) {
+        if (Array.isArray(references) && references.length) {
+          for (const ref of references) {
+            if (ref.type === 'PRODUCT') {
+              const product = await prisma.product.findUnique({ where: { id: ref.referenceId }, select: { id: true } });
+              if (!product) return res.status(400).json({ error: `Produto não encontrado: ${ref.referenceId}` });
+            } else if (ref.type === 'CATEGORY') {
+              const category = await prisma.category.findUnique({ where: { id: ref.referenceId }, select: { id: true } });
+              if (!category) return res.status(400).json({ error: `Categoria não encontrada: ${ref.referenceId}` });
+            } else if (ref.type === 'VARIANT') {
+              const variant = await prisma.productVariant.findUnique({ where: { id: ref.referenceId }, select: { id: true } });
+              if (!variant) return res.status(400).json({ error: `Variante não encontrada: ${ref.referenceId}` });
+            }
+          }
+        }
+
         await prisma.chatLabelReference.deleteMany({ where: { labelId: id } });
         if (references.length) {
           data.references = {
@@ -920,10 +979,13 @@ class ChatController {
       });
       const customerName = customer?.name || customer?.email || 'Cliente';
 
+      const unreadCount = await syncUnreadCount(chatId);
+
       socketService.broadcastNewMessage(chatId, chat.order.userId, reopenMessage, false, {
         orderId: chat.orderId,
         type: 'reopened',
         customerName,
+        unreadCount,
       });
 
       const fullChat = await emitFullChatUpdate(chatId, { skipListUpdate: true });
@@ -957,29 +1019,6 @@ class ChatController {
     }
   }
 
-  async togglePinMessage(req, res) {
-    try {
-      if (!req.user.isAdmin) return res.status(403).json({ error: 'Acesso negado' });
-      const { chatId, messageId } = req.params;
-
-      const message = await prisma.chatMessage.findFirst({
-        where: { id: messageId, chatId },
-      });
-      if (!message) return res.status(404).json({ error: 'Mensagem não encontrada' });
-
-      const updated = await prisma.chatMessage.update({
-        where: { id: messageId },
-        data: { isPinned: !message.isPinned },
-      });
-
-      socketService.emitToChat(chatId, 'message_pinned', { chatId, message: updated });
-
-      return res.json(updated);
-    } catch (err) {
-      return res.status(400).json({ error: 'Erro ao fixar mensagem' });
-    }
-  }
-
   async listClients(req, res) {
     try {
       if (!req.user.isAdmin) return res.status(403).json({ error: 'Acesso negado' });
@@ -987,7 +1026,7 @@ class ChatController {
       const pageSize = 20;
       const skip = (Number(page) - 1) * pageSize;
 
-      const where = { orders: { some: { status: { in: ['PAID', 'DELIVERED'] } } } };
+      const where = {};
       if (search) {
         where.OR = [
           { name: { contains: search, mode: 'insensitive' } },
@@ -1004,6 +1043,9 @@ class ChatController {
             email: true,
             image: true,
             createdAt: true,
+            isAdmin: true,
+            roleId: true,
+            role: { select: { id: true, name: true } },
             orders: {
               where: { status: { in: ['PAID', 'DELIVERED'] } },
               select: { id: true, total: true, status: true, createdAt: true },
@@ -1041,6 +1083,9 @@ class ChatController {
             email: u.email,
             image: u.image,
             createdAt: u.createdAt,
+            isAdmin: u.isAdmin,
+            roleId: u.roleId,
+            role: u.role,
             recentOrders: u.orders,
             ordersCount: stats._count.id,
             totalSpent: stats._sum.total || 0,

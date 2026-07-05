@@ -5,19 +5,35 @@ const { prisma } = require('../config/prisma');
 let io = null;
 /** @type {Map<string, number>} */
 const activeUsers = new Map();
+/** @type {Map<string, { userId: string; expires: number }>} */
+const joinChatCache = new Map();
+const JOIN_CACHE_TTL_MS = 60_000;
 
-const init = (server, allowedOrigins) => {
+const init = async (server, allowedOrigins) => {
   io = new Server(server, {
     cors: {
       origin: allowedOrigins,
       credentials: true,
       methods: ['GET', 'POST'],
     },
-    // Explicit path avoids conflicts with Express routes
     path: '/socket.io/',
     pingTimeout: 60000,
     pingInterval: 25000,
   });
+
+  if (process.env.REDIS_URL) {
+    try {
+      const { createAdapter } = require('@socket.io/redis-adapter');
+      const { createClient } = require('redis');
+      const pub = createClient({ url: process.env.REDIS_URL });
+      const sub = pub.duplicate();
+      await Promise.all([pub.connect(), sub.connect()]);
+      io.adapter(createAdapter(pub, sub));
+      console.log('[SOCKET] Redis adapter ativo');
+    } catch (err) {
+      console.warn('[SOCKET] Redis adapter indisponível:', err.message);
+    }
+  }
 
   io.use(async (socket, next) => {
     const token = socket.handshake.auth?.token;
@@ -33,7 +49,6 @@ const init = (server, allowedOrigins) => {
         return next(new Error('Authentication error: Invalid token payload'));
       }
 
-      // Always resolve admin flag from DB — JWT cookie may not include isAdmin
       const user = await prisma.user.findUnique({
         where: { id: payload.id },
         select: { id: true, isAdmin: true },
@@ -58,20 +73,24 @@ const init = (server, allowedOrigins) => {
     const currentConns = activeUsers.get(userId) || 0;
     activeUsers.set(userId, currentConns + 1);
 
-    console.log(`[SOCKET] Conectado: ${userId} (${isAdmin ? 'Admin' : 'Cliente'})`);
-
     socket.join(`user_${userId}`);
 
     if (isAdmin) {
       socket.join('admins');
+      socket.emit('presence_update', getActiveUsers());
     }
 
-    // Send current presence list immediately to the connecting client
-    socket.emit('presence_update', getActiveUsers());
-    broadcastPresenceUpdate();
+    broadcastPresenceToAdmins();
 
     socket.on('join_chat', async (chatId) => {
       if (!chatId || typeof chatId !== 'string') return;
+
+      const cacheKey = `${userId}:${chatId}`;
+      const cached = joinChatCache.get(cacheKey);
+      if (cached && cached.expires > Date.now()) {
+        socket.join(`chat_${chatId}`);
+        return;
+      }
 
       try {
         const chat = await prisma.chat.findUnique({
@@ -82,10 +101,10 @@ const init = (server, allowedOrigins) => {
         if (!chat) return;
 
         if (!isAdmin && chat.order.userId !== userId) {
-          console.warn(`[SOCKET] Acesso negado ao chat ${chatId} para ${userId}`);
           return;
         }
 
+        joinChatCache.set(cacheKey, { userId, expires: Date.now() + JOIN_CACHE_TTL_MS });
         socket.join(`chat_${chatId}`);
       } catch (err) {
         console.error('[SOCKET] Erro ao entrar no chat:', err.message);
@@ -96,13 +115,19 @@ const init = (server, allowedOrigins) => {
       if (chatId) socket.leave(`chat_${chatId}`);
     });
 
+    let typingTimer = null;
     socket.on('typing_start', ({ chatId }) => {
       if (!chatId) return;
+      if (typingTimer) clearTimeout(typingTimer);
       emitToChat(chatId, 'typing', { chatId, userId, isTyping: true, isAdmin });
+      typingTimer = setTimeout(() => {
+        emitToChat(chatId, 'typing', { chatId, userId, isTyping: false, isAdmin });
+      }, 3000);
     });
 
     socket.on('typing_stop', ({ chatId }) => {
       if (!chatId) return;
+      if (typingTimer) clearTimeout(typingTimer);
       emitToChat(chatId, 'typing', { chatId, userId, isTyping: false, isAdmin });
     });
 
@@ -113,7 +138,7 @@ const init = (server, allowedOrigins) => {
       } else {
         activeUsers.set(userId, conns - 1);
       }
-      broadcastPresenceUpdate();
+      broadcastPresenceToAdmins();
     });
   });
 
@@ -124,9 +149,9 @@ const getIo = () => io;
 
 const getActiveUsers = () => Array.from(activeUsers.keys());
 
-const broadcastPresenceUpdate = () => {
+const broadcastPresenceToAdmins = () => {
   if (io) {
-    io.emit('presence_update', getActiveUsers());
+    io.to('admins').emit('presence_update', getActiveUsers());
   }
 };
 
@@ -142,10 +167,10 @@ const emitToAdmins = (event, data) => {
   if (io) io.to('admins').emit(event, data);
 };
 
-/** Broadcast a new message to chat room + personal rooms (reliable delivery) */
+/** Broadcast a new message — sem fan-out global de new_message para todos admins */
 const broadcastNewMessage = (chatId, orderUserId, message, senderIsAdmin, meta = {}) => {
   const payload = { chatId, orderId: meta.orderId, ...message };
-  const alertPayload = { chatId, message, ...meta };
+  const alertPayload = { chatId, message, unreadCount: meta.unreadCount, ...meta };
 
   emitToChat(chatId, 'new_message', payload);
   emitToUser(orderUserId, 'new_message', payload);
@@ -153,24 +178,34 @@ const broadcastNewMessage = (chatId, orderUserId, message, senderIsAdmin, meta =
   if (senderIsAdmin) {
     emitToUser(orderUserId, 'new_message_alert', alertPayload);
   } else {
-    emitToAdmins('new_message', payload);
     emitToAdmins('new_message_alert', alertPayload);
   }
 
-  emitToAdmins('chat_list_update', { chatId, lastMessage: message, ...meta });
+  emitToAdmins('chat_list_update', {
+    chatId,
+    lastMessage: message,
+    unreadCount: meta.unreadCount,
+    ...meta,
+  });
 };
 
 const notifyChatCreated = (chatId, orderUserId, lastMessage, meta = {}) => {
-  const alertPayload = { chatId, type: 'new_chat', ...meta };
+  const alertPayload = { chatId, type: 'new_chat', unreadCount: meta.unreadCount ?? 1, ...meta };
 
   emitToUser(orderUserId, 'new_message_alert', alertPayload);
   emitToAdmins('new_message_alert', alertPayload);
-  emitToAdmins('chat_list_update', { chatId, type: 'new_chat', lastMessage, ...meta });
+  emitToAdmins('chat_list_update', {
+    chatId,
+    type: 'new_chat',
+    lastMessage,
+    unreadCount: meta.unreadCount ?? 1,
+    ...meta,
+  });
 
   if (lastMessage) {
     const payload = { chatId, ...lastMessage };
     emitToUser(orderUserId, 'new_message', payload);
-    emitToAdmins('new_message', payload);
+    emitToChat(chatId, 'new_message', payload);
   }
 };
 

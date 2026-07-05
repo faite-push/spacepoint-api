@@ -1,5 +1,6 @@
 const { prisma } = require('../config/prisma');
 const { tiptapToPlainText } = require('../utils/tiptapText');
+const { setInitialUnreadCount } = require('./chatUnread.service');
 
 /**
  * Business logic for chat system
@@ -125,34 +126,51 @@ async function sendProductInstructions(tx, chatId, orderItems) {
   }
 }
 
-async function labelMatchesOrderItem(label, item, product) {
+async function labelMatchesOrderItem(label, item) {
   const refs = label.references || [];
   if (!refs.length) return false;
+
   return refs.some((ref) => {
-    if (ref.type === 'PRODUCT' && ref.referenceId === item.productId) return true;
-    if (ref.type === 'VARIANT' && ref.referenceId === item.variantId) return true;
-    if (ref.type === 'CATEGORY' && product?.categoryId === ref.referenceId) return true;
-    return false;
+    switch (ref.type) {
+      case 'PRODUCT':
+        return Boolean(item.productId) && item.productId === ref.referenceId;
+      case 'VARIANT':
+        return Boolean(item.variantId) && item.variantId === ref.referenceId;
+      case 'CATEGORY':
+        return Boolean(item.product?.categoryId) && item.product.categoryId === ref.referenceId;
+      default:
+        return false;
+    }
   });
 }
 
 async function applyAutoLabelsForOrder(tx, chatId, orderItems) {
   if (!orderItems?.length) return;
 
-  const productIds = [...new Set(orderItems.map((i) => i.productId))];
-  const products = await tx.product.findMany({
-    where: { id: { in: productIds } },
-    select: { id: true, categoryId: true },
-  });
+  const productIds = [...new Set(orderItems.map((i) => i.productId).filter(Boolean))];
+  const products = productIds.length
+    ? await tx.product.findMany({
+        where: { id: { in: productIds } },
+        select: { id: true, categoryId: true },
+      })
+    : [];
   const productsById = new Map(products.map((p) => [p.id, p]));
 
-  const labels = await tx.chatLabel.findMany({ include: { references: true } });
+  const items = orderItems.map((item) => ({
+    ...item,
+    product: item.product?.categoryId != null
+      ? item.product
+      : productsById.get(item.productId) ?? item.product,
+  }));
+
+  const labels = await tx.chatLabel.findMany({
+    where: { references: { some: {} } },
+    include: { references: true },
+  });
+
   const matchingLabelIds = labels
-    .filter((label) => label.references?.length > 0)
     .filter((label) =>
-      orderItems.some((item) =>
-        labelMatchesOrderItem(label, item, productsById.get(item.productId))
-      )
+      items.some((item) => labelMatchesOrderItem(label, item))
     )
     .map((l) => l.id);
 
@@ -237,6 +255,8 @@ async function initializeChatForPaidOrder(tx, orderId) {
       where: { id: chat.id },
       data: { updatedAt: new Date() },
     });
+
+    await setInitialUnreadCount(chat.id, tx);
   }
 
   return chat;

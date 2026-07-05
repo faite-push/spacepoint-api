@@ -27,6 +27,7 @@ router.delete('/v2/api/chats/labels/:id', ...adminGuard, requirePermission('chat
 
 router.get('/v2/api/chats/ws-token', authenticate, chatControllers.getWsToken);
 router.get('/v2/api/chats/order/:orderId', authenticate, optionalAdmin, chatControllers.getChatByOrder);
+router.get('/v2/api/chats/order/:orderId/messages', authenticate, optionalAdmin, chatControllers.listMessages);
 router.get('/v2/api/chats', ...adminGuard, requirePermission('chats:view'), chatControllers.listChats);
 
 router.get('/v2/api/chats/:chatId', ...adminGuard, requirePermission('chats:view'), chatControllers.getChatById);
@@ -43,7 +44,6 @@ router.post('/v2/api/chats/:chatId/reopen', authenticate, chatControllers.reopen
 router.put('/v2/api/chats/:chatId/labels', ...adminGuard, requirePermission('chats:manage'), chatControllers.updateChatLabels);
 router.put('/v2/api/chats/:chatId/status', ...adminGuard, requirePermission('chats:manage'), chatControllers.updateChatStatus);
 router.patch('/v2/api/chats/:chatId/assign', ...adminGuard, requirePermission('chats:manage'), chatControllers.assignChat);
-router.patch('/v2/api/chats/:chatId/messages/:messageId/pin', ...adminGuard, requirePermission('chats:manage'), chatControllers.togglePinMessage);
 router.patch('/v2/api/chats/:chatId/read', ...adminGuard, requirePermission('chats:view'), chatControllers.markChatAsRead);
 router.post('/v2/api/chats/:chatId/items/:itemId/deliver', ...adminGuard, requirePermission('chats:manage'), chatControllers.deliverItem);
 
