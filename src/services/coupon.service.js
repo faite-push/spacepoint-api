@@ -99,6 +99,42 @@ async function validateCouponForOrder(tx, { code, userId, orderItems, subtotalCe
 }
 
 async function recordCouponUsage(tx, { coupon, userId, orderId, discountCents }) {
+  await tx.$executeRaw`SELECT 1 FROM "Coupon" WHERE id = ${coupon.id} FOR UPDATE`;
+
+  const fresh = await tx.coupon.findUnique({ where: { id: coupon.id } });
+  if (!fresh) throw new Error('Cupom não encontrado');
+
+  if (fresh.maxUses != null && fresh.usedCount >= fresh.maxUses) {
+    throw new Error('Este cupom atingiu o limite de usos');
+  }
+
+  if (fresh.perUserLimit != null && fresh.perUserLimit > 0) {
+    const userUses = await tx.couponUsage.count({
+      where: { couponId: coupon.id, userId },
+    });
+    if (userUses >= fresh.perUserLimit) {
+      throw new Error('Você já utilizou este cupom o número máximo de vezes');
+    }
+  }
+
+  if (fresh.maxUses != null) {
+    const updated = await tx.coupon.updateMany({
+      where: {
+        id: coupon.id,
+        usedCount: { lt: fresh.maxUses },
+      },
+      data: { usedCount: { increment: 1 } },
+    });
+    if (updated.count === 0) {
+      throw new Error('Este cupom atingiu o limite de usos');
+    }
+  } else {
+    await tx.coupon.update({
+      where: { id: coupon.id },
+      data: { usedCount: { increment: 1 } },
+    });
+  }
+
   await tx.couponUsage.create({
     data: {
       couponId: coupon.id,
@@ -106,10 +142,6 @@ async function recordCouponUsage(tx, { coupon, userId, orderId, discountCents })
       orderId,
       discount: discountCents / 100,
     },
-  });
-  await tx.coupon.update({
-    where: { id: coupon.id },
-    data: { usedCount: { increment: 1 } },
   });
 }
 

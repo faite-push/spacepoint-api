@@ -7,11 +7,23 @@ const {
   verifyAndFulfillPayment,
   syncPendingOrderPayment,
 } = require('../services/payment.service');
+const {
+  assertMercadoPagoWebhook,
+  assertStripeWebhook,
+  assertEfiWebhook,
+  assertPagBankWebhook,
+} = require('../services/webhookVerification.service');
 const { prisma } = require('../config/prisma');
 
 class PaymentController {
   async efiWebhook(req, res) {
     try {
+      const verification = assertEfiWebhook(req.body);
+      if (!verification.valid) {
+        console.warn('[PaymentController.efiWebhook] Rejected:', verification.error);
+        return res.status(400).json({ error: verification.error });
+      }
+
       res.status(200).json({ received: true });
 
       const body = req.body;
@@ -30,6 +42,12 @@ class PaymentController {
 
   async mercadoPagoWebhook(req, res) {
     try {
+      const verification = await assertMercadoPagoWebhook(req);
+      if (!verification.valid) {
+        console.warn('[PaymentController.mercadoPagoWebhook] Rejected:', verification.error);
+        return res.status(401).json({ error: verification.error });
+      }
+
       res.status(200).send('OK');
       await handleMercadoPagoWebhook(req.body || {}, req.query || {});
     } catch (err) {
@@ -39,8 +57,14 @@ class PaymentController {
 
   async pagbankWebhook(req, res) {
     try {
-      res.status(200).json({ received: true });
       const payload = { ...(req.query || {}), ...(req.body || {}) };
+      const verification = assertPagBankWebhook(req.body || {}, req.query || {});
+      if (!verification.valid) {
+        console.warn('[PaymentController.pagbankWebhook] Rejected:', verification.error);
+        return res.status(400).json({ error: verification.error });
+      }
+
+      res.status(200).json({ received: true });
       await handlePagBankWebhook(payload);
     } catch (err) {
       console.error('[PaymentController.pagbankWebhook]', err);
@@ -49,6 +73,12 @@ class PaymentController {
 
   async stripeWebhook(req, res) {
     try {
+      const verification = await assertStripeWebhook(req);
+      if (!verification.valid) {
+        console.warn('[PaymentController.stripeWebhook] Rejected:', verification.error);
+        return res.status(401).json({ error: verification.error });
+      }
+
       res.status(200).json({ received: true });
       await handleStripeWebhook(req.body);
     } catch (err) {

@@ -268,7 +268,6 @@ class CouponController {
 
       const coupon = await prisma.coupon.findUnique({
         where: { code: code.toUpperCase() },
-        include: { references: true }
       });
 
       if (!coupon) {
@@ -292,7 +291,16 @@ class CouponController {
         return res.status(400).json({ error: 'Este cupom atingiu o limite de usos' });
       }
 
-      return res.json({ coupon });
+      return res.json({
+        coupon: {
+          id: coupon.id,
+          code: coupon.code,
+          type: coupon.type,
+          value: Number(coupon.value),
+          minOrderValue: coupon.minOrderValue != null ? Number(coupon.minOrderValue) : null,
+          maxDiscount: coupon.maxDiscount != null ? Number(coupon.maxDiscount) : null,
+        },
+      });
     } catch (err) {
       console.error('[COUPONS] Validate error:', err);
       return res.status(500).json({ error: 'Erro ao validar cupom' });

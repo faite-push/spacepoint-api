@@ -57,6 +57,36 @@ function sanitizeJson(value) {
   }
 }
 
+function roundMoney(value) {
+  return Math.round(Number(value) * 100) / 100;
+}
+
+function computeAdjustedPrice(current, mode, value) {
+  const base = Number(current) || 0;
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return null;
+
+  if (mode === 'fixed') return roundMoney(Math.max(0.01, amount));
+  if (mode === 'increase_percent') return roundMoney(Math.max(0.01, base * (1 + amount / 100)));
+  if (mode === 'decrease_percent') return roundMoney(Math.max(0.01, base * (1 - amount / 100)));
+  return null;
+}
+
+async function resolveBulkProductIds(productIds) {
+  if (Array.isArray(productIds) && productIds.length > 0) {
+    const ids = [...new Set(productIds.map((id) => sanitizeString(String(id), 60)).filter(Boolean))];
+    if (ids.length > 1000) {
+      const err = new Error('Máximo de 1000 produtos por ação em massa');
+      err.status = 400;
+      throw err;
+    }
+    return ids;
+  }
+
+  const all = await prisma.product.findMany({ select: { id: true } });
+  return all.map((p) => p.id);
+}
+
 // ─── Controller ──────────────────────────────────────────────────────────────
 
 class ProductAdminController {
@@ -467,6 +497,155 @@ class ProductAdminController {
     } catch (err) {
       console.error('[ProductAdmin.convertToVariant]', err);
       return res.status(500).json({ error: 'Erro ao converter pacote em variante' });
+    }
+  }
+
+  async bulkActions(req, res) {
+    try {
+      const action = sanitizeString(req.body?.action || '', 40);
+      const applyToRaw = ['products', 'variants', 'both'].includes(req.body?.applyTo)
+        ? req.body.applyTo
+        : req.body?.includeVariants === false
+          ? 'products'
+          : 'both';
+      const updateProducts = applyToRaw === 'products' || applyToRaw === 'both';
+      const updateVariants = applyToRaw === 'variants' || applyToRaw === 'both';
+
+      const ids = await resolveBulkProductIds(req.body?.productIds);
+      if (!ids.length) {
+        return res.status(400).json({ error: 'Nenhum produto encontrado para a ação' });
+      }
+
+      if (action === 'visibility') {
+        const isVisible = Boolean(req.body?.isVisible);
+
+        const result = await prisma.$transaction(async (tx) => {
+          let products = { count: 0 };
+          if (updateProducts) {
+            products = await tx.product.updateMany({
+              where: { id: { in: ids } },
+              data: { isVisible },
+            });
+          }
+
+          let variants = { count: 0 };
+          if (updateVariants) {
+            variants = await tx.productVariant.updateMany({
+              where: { productId: { in: ids } },
+              data: { isVisible },
+            });
+          }
+
+          return { products: products.count, variants: variants.count };
+        });
+
+        return res.json({
+          success: true,
+          updatedProducts: result.products,
+          updatedVariants: result.variants,
+          applyTo: applyToRaw,
+        });
+      }
+
+      if (action === 'price') {
+        const targetField = req.body?.targetField === 'comparePrice' ? 'comparePrice' : 'price';
+        const mode = ['fixed', 'increase_percent', 'decrease_percent'].includes(req.body?.mode)
+          ? req.body.mode
+          : null;
+        const value = Number(req.body?.value);
+        const alsoApplyToComparePrice = Boolean(req.body?.alsoApplyToComparePrice);
+
+        if (!mode) {
+          return res.status(400).json({ error: 'Modo de alteração inválido' });
+        }
+        if (!Number.isFinite(value) || value < 0) {
+          return res.status(400).json({ error: 'Valor inválido' });
+        }
+        if (mode !== 'fixed' && value > 1000) {
+          return res.status(400).json({ error: 'Porcentagem máxima: 1000%' });
+        }
+
+        const [products, variants] = await Promise.all([
+          updateProducts
+            ? prisma.product.findMany({
+                where: { id: { in: ids } },
+                select: { id: true, price: true, comparePrice: true },
+              })
+            : Promise.resolve([]),
+          updateVariants
+            ? prisma.productVariant.findMany({
+                where: { productId: { in: ids } },
+                select: { id: true, price: true, comparePrice: true },
+              })
+            : Promise.resolve([]),
+        ]);
+
+        let updatedProducts = 0;
+        let updatedVariants = 0;
+
+        await prisma.$transaction(async (tx) => {
+          for (const product of products) {
+            const data = {};
+            const priceBase = Number(product.price) || 0;
+            const compareBase = Number(product.comparePrice) || priceBase;
+
+            if (targetField === 'price') {
+              const nextPrice = computeAdjustedPrice(priceBase, mode, value);
+              if (nextPrice != null) data.price = nextPrice;
+              if (alsoApplyToComparePrice) {
+                const nextCompare = computeAdjustedPrice(compareBase, mode, value);
+                if (nextCompare != null) data.comparePrice = nextCompare;
+              }
+            } else {
+              const nextCompare = computeAdjustedPrice(compareBase, mode, value);
+              if (nextCompare != null) data.comparePrice = nextCompare;
+            }
+
+            if (Object.keys(data).length) {
+              await tx.product.update({ where: { id: product.id }, data });
+              updatedProducts += 1;
+            }
+          }
+
+          for (const variant of variants) {
+            const data = {};
+            const priceBase = Number(variant.price) || 0;
+            const compareBase = Number(variant.comparePrice) || priceBase;
+
+            if (targetField === 'price') {
+              const nextPrice = computeAdjustedPrice(priceBase, mode, value);
+              if (nextPrice != null) data.price = nextPrice;
+              if (alsoApplyToComparePrice) {
+                const nextCompare = computeAdjustedPrice(compareBase, mode, value);
+                if (nextCompare != null) data.comparePrice = nextCompare;
+              }
+            } else {
+              const nextCompare = computeAdjustedPrice(compareBase, mode, value);
+              if (nextCompare != null) data.comparePrice = nextCompare;
+            }
+
+            if (Object.keys(data).length) {
+              await tx.productVariant.update({ where: { id: variant.id }, data });
+              updatedVariants += 1;
+            }
+          }
+        });
+
+        return res.json({
+          success: true,
+          updatedProducts,
+          updatedVariants,
+          applyTo: applyToRaw,
+        });
+      }
+
+      return res.status(400).json({ error: 'Ação em massa inválida' });
+    } catch (err) {
+      if (err.status === 400) {
+        return res.status(400).json({ error: err.message });
+      }
+      console.error('[ProductAdmin.bulkActions]', err);
+      return res.status(500).json({ error: 'Erro ao executar ação em massa' });
     }
   }
 }

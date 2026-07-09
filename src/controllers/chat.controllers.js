@@ -7,6 +7,9 @@ const socketService = require('../services/websocket.service');
 const { syncAutomaticStockFromCodes } = require('../utils/digitalStock');
 const { syncUnreadCount, resetUnreadCount, setInitialUnreadCount, fetchChatMessages } = require('../services/chatUnread.service');
 const { getReviewsSettings } = require('../utils/reviewsSettings');
+const { signChatFileUrl, signChatMessageFileUrls } = require('../utils/cdnSignedUrl');
+const { userHasPermission } = require('../middleware/permissionMiddleware');
+const { claimOneCodeForDelivery } = require('../services/orderFulfillment.service');
 
 const ORDER_LIST_INCLUDE = {
   user: { select: { id: true, name: true, email: true, image: true } },
@@ -149,6 +152,7 @@ class ChatController {
       const { messages, hasMore } = await fetchChatMessages(chat.id, {
         before,
         limit: messageLimit,
+        req,
       });
 
       const userStats = await prisma.order.aggregate({
@@ -241,39 +245,15 @@ class ChatController {
           let deliveryContent = line;
 
           if (deliveryType === 'automatic_lines' || useStock) {
-            const reserved = await tx.productCode.findMany({
-              where: { orderItemId: item.id, status: 'RESERVED' },
-              take: 1,
-              orderBy: { createdAt: 'asc' },
+            const codeToDeliver = await claimOneCodeForDelivery(tx, {
+              orderItemId: item.id,
+              productId: item.productId,
+              variantId: item.variantId ?? null,
             });
-
-            let codeToDeliver = reserved[0];
-
-            if (!codeToDeliver) {
-              const available = await tx.productCode.findMany({
-                where: {
-                  productId: item.productId,
-                  variantId: item.variantId ?? null,
-                  status: 'AVAILABLE',
-                },
-                take: 1,
-                orderBy: { createdAt: 'asc' },
-              });
-              codeToDeliver = available[0];
-            }
 
             if (!codeToDeliver) {
               throw new Error('Sem códigos disponíveis para entrega');
             }
-
-            await tx.productCode.update({
-              where: { id: codeToDeliver.id },
-              data: {
-                status: 'DELIVERED',
-                deliveredAt: new Date(),
-                orderItemId: item.id,
-              },
-            });
 
             await syncAutomaticStockFromCodes(tx, item.productId, item.variantId ?? null);
 
@@ -415,6 +395,15 @@ class ChatController {
       const isChatCustomer = chat.order.userId === senderId;
       const isStaffMessage = req.user.isAdmin && !isChatCustomer;
 
+      if (isStaffMessage) {
+        const allowed = await userHasPermission(senderId, 'chats:manage');
+        if (!allowed) {
+          return res.status(403).json({
+            error: 'Acesso negado: falta a permissão chats:manage',
+          });
+        }
+      }
+
       let staffTitle = null;
       if (isStaffMessage) {
         const staffUser = await prisma.user.findUnique({
@@ -466,14 +455,19 @@ class ChatController {
         }
       }
 
+      const signedMessage = {
+        ...message,
+        fileUrl: signChatFileUrl(message.fileUrl, req),
+      };
+
       const customerName = chat.order.user?.name || chat.order.user?.email || 'Cliente';
-      socketService.broadcastNewMessage(chatId, chat.order.userId, message, isStaffMessage, {
+      socketService.broadcastNewMessage(chatId, chat.order.userId, signedMessage, isStaffMessage, {
         orderId: chat.orderId,
         customerName,
         unreadCount,
       });
 
-      return res.status(201).json(message);
+      return res.status(201).json(signedMessage);
     } catch (err) {
       console.error('[ChatController.sendMessage]', err);
       return res.status(500).json({ error: 'Erro ao enviar mensagem' });
@@ -503,7 +497,7 @@ class ChatController {
 
       const before = typeof req.query.before === 'string' ? req.query.before : undefined;
       const limit = req.query.limit;
-      const result = await fetchChatMessages(chat.id, { before, limit });
+      const result = await fetchChatMessages(chat.id, { before, limit, req });
 
       return res.json({
         messages: result.messages,
@@ -585,7 +579,10 @@ class ChatController {
       ]);
 
       return res.json({
-        chats,
+        chats: chats.map((chat) => ({
+          ...chat,
+          messages: signChatMessageFileUrls(chat.messages, req),
+        })),
         total,
         page: Number(page),
         totalPages: Math.ceil(total / pageSize),
@@ -888,6 +885,7 @@ class ChatController {
 
       return res.json({
         ...chat,
+        messages: signChatMessageFileUrls(chat.messages, req),
         userStats: {
           totalSpent: userStats._sum.total || 0,
           ordersCount: userStats._count.id || 0,

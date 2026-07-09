@@ -16,6 +16,26 @@ const setAuthCookies = (res, user) => {
   res.cookie('csrf_token', csrfToken, { ...COOKIE_BASE, httpOnly: false, maxAge: 7 * 24 * 60 * 60 * 1000 });
 };
 
+function sanitizeReturnTo(value) {
+  if (!value || typeof value !== 'string') return null;
+  const path = value.trim();
+  if (!path.startsWith('/') || path.startsWith('//')) return null;
+  return path.slice(0, 200);
+}
+
+function setOAuthReturnCookie(res, returnTo) {
+  const safe = sanitizeReturnTo(returnTo);
+  if (!safe) return;
+  res.cookie('oauth_return_to', safe, { ...COOKIE_BASE, maxAge: 10 * 60 * 1000 });
+}
+
+function resolveOAuthRedirect(req, res) {
+  const path = sanitizeReturnTo(req.cookies?.oauth_return_to);
+  res.clearCookie('oauth_return_to', { path: '/', domain: COOKIE_BASE.domain });
+  const base = String(process.env.FRONTEND_URL || '').replace(/\/$/, '');
+  return path ? `${base}${path}` : base || '/';
+}
+
 const upsertUser = async ({ provider, providerId, name, email, image }) => {
   const where = provider === 'discord'
     ? { discordId: providerId }
@@ -38,6 +58,7 @@ const upsertUser = async ({ provider, providerId, name, email, image }) => {
 
 class AuthController {
   redirectDiscord(req, res) {
+    setOAuthReturnCookie(res, req.query.returnTo);
     const authUrl = new URL('https://discord.com/oauth2/authorize');
     authUrl.searchParams.set('response_type', 'code');
     authUrl.searchParams.set('client_id', process.env.DISCORD_CLIENT_ID);
@@ -80,7 +101,7 @@ class AuthController {
       const user = await upsertUser({ provider: 'discord', providerId: id, name: username, email, image });
 
       setAuthCookies(res, user);
-      return res.redirect(process.env.FRONTEND_URL);
+      return res.redirect(resolveOAuthRedirect(req, res));
     } catch (err) {
       console.error('[Discord OAuth Error]', err.response?.data || err.message);
       return res.redirect(`${process.env.FRONTEND_URL}/login?error=discord_failed`);
@@ -88,6 +109,7 @@ class AuthController {
   }
 
   redirectGoogle(req, res) {
+    setOAuthReturnCookie(res, req.query.returnTo);
     const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
     authUrl.searchParams.set('response_type', 'code');
     authUrl.searchParams.set('client_id', process.env.GOOGLE_CLIENT_ID);
@@ -124,7 +146,7 @@ class AuthController {
       const user = await upsertUser({ provider: 'google', providerId: id, name, email, image: picture });
 
       setAuthCookies(res, user);
-      return res.redirect(process.env.FRONTEND_URL);
+      return res.redirect(resolveOAuthRedirect(req, res));
     } catch (err) {
       console.error('[Google OAuth Error]', err.response?.data || err.message);
       return res.redirect(`${process.env.FRONTEND_URL}/login?error=google_failed`);

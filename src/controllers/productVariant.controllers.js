@@ -1,5 +1,6 @@
 const { prisma } = require('../config/prisma');
 const { sanitizeString } = require('../utils/sanitize');
+const { generateVariantId } = require('../utils/idGenerators');
 const {
   syncDigitalStock,
   ensureDigitalStockSynced,
@@ -186,6 +187,127 @@ const ProductVariantController = {
     } catch (err) {
       console.error("[ProductVariant.reorder]", err);
       return res.status(500).json({ error: "Erro ao reordenar variantes" });
+    }
+  },
+
+  async bulkGenerate(req, res) {
+    try {
+      const { productId } = req.params;
+      const { variants: items, defaults = {} } = req.body;
+
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ error: 'Informe ao menos uma variante para gerar' });
+      }
+      if (items.length > 50) {
+        return res.status(400).json({ error: 'Máximo de 50 variantes por geração' });
+      }
+
+      const product = await prisma.product.findUnique({ where: { id: productId }, select: { id: true } });
+      if (!product) return res.status(404).json({ error: 'Produto não encontrado' });
+
+      const existing = await prisma.productVariant.findMany({
+        where: { productId },
+        select: { name: true },
+      });
+      const existingNames = new Set(existing.map((v) => v.name.trim().toLowerCase()));
+
+      const baseDefaults = {
+        deliveryType: 'automatic_lines',
+        digitalLines: [],
+        stockQuantity: 0,
+        minPurchaseQuantity: 1,
+        isVisible: true,
+        isActive: true,
+        onePurchasePerUser: false,
+        ...defaults,
+      };
+
+      const toCreate = [];
+      const skipped = [];
+
+      for (const item of items) {
+        const name = String(item.name || '').trim();
+        const price = parseFloat(item.price);
+        if (!name) {
+          return res.status(400).json({ error: 'Todas as variantes precisam de nome' });
+        }
+        if (Number.isNaN(price) || price <= 0) {
+          return res.status(400).json({ error: `Preço inválido para "${name}"` });
+        }
+        if (existingNames.has(name.toLowerCase())) {
+          skipped.push(name);
+          continue;
+        }
+        existingNames.add(name.toLowerCase());
+        const requestedStock = parseInt(item.stockQuantity, 10) || 0;
+        const hasLines = Array.isArray(item.digitalLines) && item.digitalLines.length > 0;
+        const deliveryType =
+          !hasLines && requestedStock > 0 ? 'manual' : (item.deliveryType || baseDefaults.deliveryType);
+
+        toCreate.push({
+          ...baseDefaults,
+          ...item,
+          name,
+          price,
+          comparePrice: parseDecimal(item.comparePrice),
+          stockQuantity: requestedStock,
+          deliveryType,
+        });
+      }
+
+      if (toCreate.length === 0) {
+        return res.status(400).json({
+          error: skipped.length
+            ? 'Todas as combinações já existem neste produto'
+            : 'Nenhuma variante válida para criar',
+          skipped,
+        });
+      }
+
+      const count = await prisma.productVariant.count({ where: { productId } });
+
+      const created = await prisma.$transaction(async (tx) => {
+        const results = [];
+        let nextVariantId = Number(await generateVariantId(tx));
+
+        for (let i = 0; i < toCreate.length; i += 1) {
+          const item = toCreate[i];
+          const data = buildData(item, productId);
+          data.id = String(nextVariantId);
+          nextVariantId += 1;
+          data.sortOrder = count + i;
+          if (!data.deliveryType) data.deliveryType = 'automatic_lines';
+          if (!Array.isArray(data.digitalLines)) data.digitalLines = [];
+
+          const variant = await tx.productVariant.create({ data });
+
+          if (variant.deliveryType === 'automatic_lines') {
+            const { availableCount } = await syncDigitalStock(tx, {
+              productId,
+              variantId: variant.id,
+              digitalLines: variant.digitalLines ?? [],
+            });
+            results.push(
+              await tx.productVariant.update({
+                where: { id: variant.id },
+                data: { stockQuantity: availableCount },
+              })
+            );
+          } else {
+            results.push(variant);
+          }
+        }
+        return results;
+      });
+
+      return res.status(201).json({
+        variants: created,
+        created: created.length,
+        skipped,
+      });
+    } catch (err) {
+      console.error('[ProductVariant.bulkGenerate]', err);
+      return res.status(500).json({ error: 'Erro ao gerar variantes' });
     }
   },
 

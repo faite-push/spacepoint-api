@@ -5,6 +5,99 @@ const { initializeChatForPaidOrder } = require('./chat.service');
 
 const ORDER_PAYMENT_TTL_MS = 30 * 60 * 1000;
 
+/**
+ * Reserva códigos AVAILABLE de forma atômica (updateMany com condição de status).
+ * Evita que dois pedidos concorrentes reservem o mesmo código.
+ */
+async function reserveAvailableCodes(tx, { productId, variantId, quantity, orderItemId, excludeIds = [] }) {
+  const reservedIds = [];
+  let attempts = 0;
+  const maxAttempts = Math.max(quantity * 8, 16);
+
+  while (reservedIds.length < quantity && attempts < maxAttempts) {
+    attempts += 1;
+
+    const candidate = await tx.productCode.findFirst({
+      where: {
+        status: 'AVAILABLE',
+        productId,
+        variantId: variantId ?? null,
+        ...(reservedIds.length || excludeIds.length
+          ? { id: { notIn: [...reservedIds, ...excludeIds] } }
+          : {}),
+      },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true },
+    });
+
+    if (!candidate) break;
+
+    const updated = await tx.productCode.updateMany({
+      where: { id: candidate.id, status: 'AVAILABLE' },
+      data: { status: 'RESERVED', orderItemId },
+    });
+
+    if (updated.count === 1) {
+      reservedIds.push(candidate.id);
+    }
+  }
+
+  if (reservedIds.length < quantity) {
+    throw new Error('Estoque insuficiente para reserva');
+  }
+
+  return reservedIds;
+}
+
+/**
+ * Entrega códigos AVAILABLE de forma atômica (marca DELIVERED).
+ */
+async function deliverAvailableCodes(tx, { productId, variantId, quantity, orderItemId, excludeIds = [] }) {
+  const deliveredIds = [];
+  let attempts = 0;
+  const maxAttempts = Math.max(quantity * 8, 16);
+  const now = new Date();
+
+  while (deliveredIds.length < quantity && attempts < maxAttempts) {
+    attempts += 1;
+
+    const candidate = await tx.productCode.findFirst({
+      where: {
+        status: 'AVAILABLE',
+        productId,
+        variantId: variantId ?? null,
+        ...(deliveredIds.length || excludeIds.length
+          ? { id: { notIn: [...deliveredIds, ...excludeIds] } }
+          : {}),
+      },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true },
+    });
+
+    if (!candidate) break;
+
+    const updated = await tx.productCode.updateMany({
+      where: { id: candidate.id, status: 'AVAILABLE' },
+      data: {
+        status: 'DELIVERED',
+        deliveredAt: now,
+        orderItemId,
+        variantId: variantId ?? undefined,
+      },
+    });
+
+    if (updated.count === 1) {
+      deliveredIds.push(candidate.id);
+    }
+  }
+
+  if (deliveredIds.length < quantity) {
+    throw new Error('Estoque insuficiente de códigos digitais');
+  }
+
+  return deliveredIds;
+}
+
 async function getSellableForItem(tx, item) {
   return resolveSellable(tx, item.productId, item.variantId, item.quantity);
 }
@@ -15,26 +108,12 @@ async function reserveStockForOrderItem(tx, item, orderItemId, sellable) {
   let stockReserved = 0;
 
   if (deliveryType === 'automatic_lines' || deliveryType === 'mixed') {
-    const codes = await tx.productCode.findMany({
-      where: {
-        status: 'AVAILABLE',
-        productId: item.productId,
-        variantId: item.variantId ?? null,
-      },
-      take: item.quantity,
-      orderBy: [{ createdAt: 'asc' }],
+    await reserveAvailableCodes(tx, {
+      productId: item.productId,
+      variantId: item.variantId ?? null,
+      quantity: item.quantity,
+      orderItemId,
     });
-
-    if (codes.length < item.quantity) {
-      throw new Error('Estoque insuficiente para reserva');
-    }
-
-    for (const code of codes) {
-      await tx.productCode.update({
-        where: { id: code.id },
-        data: { status: 'RESERVED', orderItemId },
-      });
-    }
     await syncAutomaticStockFromCodes(tx, item.productId, item.variantId ?? null);
   } else {
     const manualStock = entity.stockQuantity;
@@ -98,34 +177,30 @@ async function deliverOrderItem(tx, item) {
     return;
   }
 
-  const codeWhere = {
-    status: 'AVAILABLE',
-    productId: item.productId,
-    ...(item.variantId ? { variantId: item.variantId } : { variantId: null }),
-  };
+  const reservedIds = reserved.map((c) => c.id);
+  const stillNeeded = item.quantity - reserved.length;
 
-  const availableCodes = await tx.productCode.findMany({
-    where: codeWhere,
-    take: item.quantity - reserved.length,
-    orderBy: [{ createdAt: 'asc' }],
-  });
-
-  const allCodes = [...reserved, ...availableCodes];
-  if (allCodes.length < item.quantity) {
-    throw new Error('Estoque insuficiente de códigos digitais');
+  if (stillNeeded > 0) {
+    await deliverAvailableCodes(tx, {
+      productId: item.productId,
+      variantId: item.variantId ?? null,
+      quantity: stillNeeded,
+      orderItemId: item.id,
+      excludeIds: reservedIds,
+    });
   }
 
-  for (const code of allCodes) {
+  for (const code of reserved) {
     await tx.productCode.update({
       where: { id: code.id },
       data: {
         status: 'DELIVERED',
         deliveredAt: new Date(),
-        orderItemId: item.id,
         variantId: item.variantId || code.variantId,
       },
     });
   }
+
   await syncAutomaticStockFromCodes(tx, item.productId, item.variantId ?? null);
 }
 
@@ -177,6 +252,9 @@ async function releaseOrderStock(tx, orderId) {
  * Marca pedido como pago, entrega itens digitais e registra pagamento.
  */
 async function fulfillPaidOrder(tx, orderId, paymentMeta = {}) {
+  // Serializa webhooks/verificações concorrentes no mesmo pedido
+  await tx.$executeRaw`SELECT 1 FROM "Order" WHERE id = ${orderId} FOR UPDATE`;
+
   const current = await tx.order.findUnique({
     where: { id: orderId },
     include: { items: true, payments: true },
@@ -334,11 +412,60 @@ async function expireStalePendingOrders() {
   return stale.length;
 }
 
+/**
+ * Reserva e entrega um único código digital de forma atômica (admin/chat).
+ * Prioriza RESERVED do pedido; fallback para AVAILABLE.
+ */
+async function claimOneCodeForDelivery(tx, { orderItemId, productId, variantId }) {
+  const now = new Date();
+
+  const reserved = await tx.productCode.findFirst({
+    where: { orderItemId, status: 'RESERVED' },
+    orderBy: { createdAt: 'asc' },
+    select: { id: true, code: true },
+  });
+
+  if (reserved) {
+    const claimed = await tx.productCode.updateMany({
+      where: { id: reserved.id, status: 'RESERVED' },
+      data: { status: 'DELIVERED', deliveredAt: now, orderItemId },
+    });
+    if (claimed.count === 1) return reserved;
+  }
+
+  let attempts = 0;
+  while (attempts < 8) {
+    attempts += 1;
+
+    const candidate = await tx.productCode.findFirst({
+      where: {
+        status: 'AVAILABLE',
+        productId,
+        variantId: variantId ?? null,
+      },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, code: true },
+    });
+
+    if (!candidate) return null;
+
+    const claimed = await tx.productCode.updateMany({
+      where: { id: candidate.id, status: 'AVAILABLE' },
+      data: { status: 'DELIVERED', deliveredAt: now, orderItemId },
+    });
+
+    if (claimed.count === 1) return candidate;
+  }
+
+  return null;
+}
+
 module.exports = {
   ORDER_PAYMENT_TTL_MS,
   reserveStockForOrderItem,
   releaseOrderStock,
   deliverOrderItem,
+  claimOneCodeForDelivery,
   fulfillPaidOrder,
   cancelOrder,
   notifyOrderChatCreated,

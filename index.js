@@ -74,8 +74,30 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
 }));
 app.use(cookieParser(process.env.COOKIE_SECRET));
-app.use(bodyParser.json({ limit: '10mb' }));
+
+const jsonParser = bodyParser.json({ limit: '10mb' });
+const stripeRawParser = bodyParser.raw({ type: 'application/json' });
+
+app.use((req, res, next) => {
+  if (req.path.startsWith('/v1/webhooks/stripe')) {
+    return stripeRawParser(req, res, (err) => {
+      if (err) return next(err);
+      req.rawBody = req.body;
+      try {
+        req.body = JSON.parse(req.body.toString('utf8'));
+      } catch {
+        req.body = {};
+      }
+      return next();
+    });
+  }
+  return jsonParser(req, res, next);
+});
+
 app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
+
+const csrfGlobal = require('./src/middleware/csrfGlobalMiddleware');
+app.use(csrfGlobal);
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,

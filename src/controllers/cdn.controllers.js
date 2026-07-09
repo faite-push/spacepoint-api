@@ -5,9 +5,10 @@ const crypto = require('crypto');
 const { createReadStream } = require('fs');
 const sharp = require('sharp');
 const { buildCdnUrl } = require('../utils/mediaUrl');
+const { buildSignedChatCdnUrl, CHAT_FILE_PREFIX } = require('../utils/cdnSignedUrl');
+const { canAccessChatCdnFile } = require('../utils/cdnAccess');
 
 const UPLOAD_DIR = path.join(__dirname, '../', 'cdn');
-const CHAT_FILE_PREFIX = 'chat-';
 
 function isChatUpload(req) {
   const url = req.originalUrl || req.url || '';
@@ -39,6 +40,13 @@ class CdnController {
       if (!stat || !stat.isFile()) {
         return res.status(404).json({ error: 'Arquivo não encontrado' });
       };
+
+      if (filename.startsWith(CHAT_FILE_PREFIX)) {
+        const allowed = await canAccessChatCdnFile(req, filename);
+        if (!allowed) {
+          return res.status(403).json({ error: 'Acesso negado' });
+        }
+      }
 
       const mimeType = mime.lookup(filePath) || 'application/octet-stream';
 
@@ -111,7 +119,9 @@ class CdnController {
       
       await fs.unlink(req.file.path).catch(() => { });
 
-      const url = buildCdnUrl(filename, req);
+      const url = uploadType === 'chat'
+        ? buildSignedChatCdnUrl(filename, req)
+        : buildCdnUrl(filename, req);
       const stat = await fs.stat(finalPath);
 
       res.status(201).json({

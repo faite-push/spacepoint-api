@@ -214,7 +214,10 @@ class OrderController {
               },
             },
             variant: { select: { id: true, name: true, sku: true } },
-            codes: { select: { code: true, deliveredAt: true } },
+            codes: {
+              where: { status: 'DELIVERED' },
+              select: { code: true, deliveredAt: true },
+            },
           },
         },
       },

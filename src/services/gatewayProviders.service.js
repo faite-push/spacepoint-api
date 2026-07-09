@@ -587,20 +587,34 @@ async function createCardCharge(order, gateway) {
 
 async function markPaymentPaid(payment, paidCents, description) {
   let orderResult = null;
+  let fulfilled = false;
+
   await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT 1 FROM "Payment" WHERE id = ${payment.id} FOR UPDATE`;
+
+    const currentPayment = await tx.payment.findUnique({ where: { id: payment.id } });
+    if (!currentPayment || currentPayment.status !== 'PENDING') {
+      fulfilled = currentPayment?.status === 'PAID';
+      return;
+    }
+
     orderResult = await fulfillPaidOrder(tx, payment.orderId, {
       provider: payment.provider,
       externalId: payment.externalId,
       description,
       skipPaymentCreate: true,
     });
+
     await tx.payment.update({
       where: { id: payment.id },
       data: { status: 'PAID', amount: paidCents },
     });
+
+    fulfilled = true;
   });
-  notifyOrderChatCreated(orderResult);
-  return true;
+
+  if (orderResult) notifyOrderChatCreated(orderResult);
+  return fulfilled;
 }
 
 async function verifyEfiPayment(payment, gateway) {

@@ -1,4 +1,5 @@
 const { prisma } = require('../config/prisma');
+const { signChatMessageFileUrls } = require('../utils/cdnSignedUrl');
 
 const CUSTOMER_SENDERS = { notIn: ['ADMIN', 'SYSTEM'] };
 
@@ -66,7 +67,7 @@ async function setInitialUnreadCount(chatId, tx = prisma) {
   });
 }
 
-async function fetchChatMessages(chatId, { before, limit = 50 } = {}) {
+async function fetchChatMessages(chatId, { before, limit = 50, req = null } = {}) {
   const take = Math.min(Math.max(Number(limit) || 50, 1), 100);
 
   let cursorDate = null;
@@ -90,7 +91,7 @@ async function fetchChatMessages(chatId, { before, limit = 50 } = {}) {
   });
 
   const hasMore = batch.length > take;
-  const messages = batch.slice(0, take).reverse();
+  const messages = signChatMessageFileUrls(batch.slice(0, take).reverse(), req);
 
   return { messages, hasMore };
 }

@@ -276,6 +276,12 @@ class RoleController {
         if (!role) {
           return res.status(404).json({ error: 'Cargo não encontrado' });
         }
+
+        if (role.isProtected) {
+          return res.status(403).json({
+            error: 'Este cargo é protegido e não pode ser atribuído manualmente',
+          });
+        }
       }
 
       // Update user role and set isAdmin flag accordingly

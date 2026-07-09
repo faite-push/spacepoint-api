@@ -50,9 +50,14 @@ const DEFAULT_CHECKOUT_SETTINGS = {
   termsCheckedByDefault: false,
   prefillUserName: true,
   prefillUserEmail: true,
+  authMode: 'inline_at_payment',
   fields: DEFAULT_CHECKOUT_FIELDS,
   deliveryOptions: DEFAULT_DELIVERY_OPTIONS,
 };
+
+function sanitizeAuthMode(value) {
+  return value === 'login_before_checkout' ? 'login_before_checkout' : 'inline_at_payment';
+}
 
 function sanitizeCheckoutField(field, index) {
   if (!field || typeof field !== 'object') return null;
@@ -116,6 +121,7 @@ function normalizeCheckoutSettings(raw) {
     termsCheckedByDefault: Boolean(raw.termsCheckedByDefault),
     prefillUserName: raw.prefillUserName !== false,
     prefillUserEmail: raw.prefillUserEmail !== false,
+    authMode: sanitizeAuthMode(raw.authMode),
     fields: mergedFields,
     deliveryOptions: sanitizeDeliveryOptions(raw.deliveryOptions),
   };

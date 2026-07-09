@@ -1,6 +1,27 @@
 const { prisma } = require('../config/prisma');
 const { isSuperOwner } = require('../utils/auth');
 
+async function loadUserPermissions(userId) {
+  return prisma.user.findUnique({
+    where: { id: userId },
+    include: {
+      role: {
+        include: {
+          permissions: true,
+        },
+      },
+    },
+  });
+}
+
+async function userHasPermission(userId, permissionKey) {
+  const user = await loadUserPermissions(userId);
+  if (!user) return false;
+  if (isSuperOwner(user.email)) return true;
+  if (!user.role) return false;
+  return user.role.permissions.some((p) => p.key === permissionKey);
+}
+
 /**
  * Middleware para verificar se o usuário autenticado tem uma permissão específica.
  * @param {string} permissionKey - A chave da permissão (ex: 'products:create')
@@ -107,3 +128,4 @@ const requireAnyPermission = (...permissionKeys) => {
 
 module.exports = requirePermission;
 module.exports.any = requireAnyPermission;
+module.exports.userHasPermission = userHasPermission;

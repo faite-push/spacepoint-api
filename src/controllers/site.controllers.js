@@ -2,28 +2,7 @@ const { prisma } = require('../config/prisma');
 const { resolveEntityMedia } = require('../utils/mediaUrl');
 const { normalizeCheckoutSettings } = require('../utils/checkoutConfig');
 const { normalizeReviewsSettings } = require('../utils/reviewsSettings');
-
-function sanitizePublicPluginsConfig(pluginsConfig) {
-  if (!pluginsConfig || typeof pluginsConfig !== 'object' || Array.isArray(pluginsConfig)) {
-    return null;
-  }
-
-  const out = {};
-  for (const [id, entry] of Object.entries(pluginsConfig)) {
-    if (
-      entry &&
-      typeof entry === 'object' &&
-      entry.enabled === true &&
-      entry.config &&
-      typeof entry.config === 'object' &&
-      !Array.isArray(entry.config)
-    ) {
-      out[id] = { enabled: true, config: entry.config };
-    }
-  }
-
-  return Object.keys(out).length > 0 ? out : null;
-}
+const { sanitizePublicPluginsConfig } = require('../utils/publicPluginsConfig');
 
 class SiteController {
   async getConfig(req, res) {

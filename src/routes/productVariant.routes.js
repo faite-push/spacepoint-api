@@ -9,6 +9,7 @@ const ProductVariantController = require("../controllers/productVariant.controll
 const guard = [authenticate, requireAdmin];
 
 router.get("/v2/api/admin/products/:productId/variants", ...guard, requirePermission('products:view'), (req, res) => ProductVariantController.list(req, res));
+router.post("/v2/api/admin/products/:productId/variants/bulk-generate", ...guard, requirePermission('products:create'), (req, res) => ProductVariantController.bulkGenerate(req, res));
 router.post("/v2/api/admin/products/:productId/variants", ...guard, requirePermission('products:create'), (req, res) => ProductVariantController.create(req, res));
 router.post("/v2/api/admin/products/:productId/variants/:variantId/duplicate", ...guard, requirePermission('products:create'), (req, res) => ProductVariantController.duplicate(req, res));
 router.put("/v2/api/admin/products/:productId/variants/reorder", ...guard, requirePermission('products:edit'), (req, res) => ProductVariantController.reorder(req, res));

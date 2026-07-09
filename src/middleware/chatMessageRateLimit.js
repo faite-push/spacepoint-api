@@ -1,4 +1,9 @@
-const { rateLimit } = require('express-rate-limit');
+const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
+
+function chatMessageRateKey(req) {
+  if (req.user?.id) return req.user.id;
+  return ipKeyGenerator(req);
+}
 
 /** Burst: no máximo 3 mensagens a cada 5 segundos (clientes) */
 const clientChatBurstLimiter = rateLimit({
@@ -6,7 +11,7 @@ const clientChatBurstLimiter = rateLimit({
   max: 3,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => req.user?.id || req.ip,
+  keyGenerator: chatMessageRateKey,
   skip: (req) => Boolean(req.user?.isAdmin),
   message: { error: 'Aguarde alguns segundos antes de enviar outra mensagem.' },
 });
@@ -17,7 +22,7 @@ const clientChatMessageLimiter = rateLimit({
   max: 15,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => req.user?.id || req.ip,
+  keyGenerator: chatMessageRateKey,
   skip: (req) => Boolean(req.user?.isAdmin),
   message: { error: 'Você está enviando mensagens muito rápido. Aguarde um momento antes de enviar novamente.' },
 });

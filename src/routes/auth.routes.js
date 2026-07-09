@@ -8,6 +8,10 @@ const csrf = require('../middleware/csrfMiddleware');
 const AuthController = require('../controllers/auth.controllers');
 const UserController = require('../controllers/user.controllers');
 const RoleController = require('../controllers/roles.controllers');
+const {
+  otpSendLimiter,
+  otpVerifyLimiter,
+} = require('../middleware/authRateLimit');
 
 router.get('/login/discord', AuthController.redirectDiscord.bind(AuthController));
 router.get('/login/discord/callback', AuthController.callbackDiscord.bind(AuthController));
@@ -26,8 +30,8 @@ router.get('/v2/api/admin/users/:id', authenticate, requireAdmin, requirePermiss
 router.post('/v2/api/admin/users/:id/toggle-admin', authenticate, requireAdmin, csrf, requirePermission('roles:manage'), UserController.toggleAdmin.bind(UserController));
 router.put('/api/admin/roles/reorder', authenticate, requireAdmin, csrf, requirePermission('roles:manage'), RoleController.reorderRoles.bind(RoleController));
 
-router.post('/api/auth/send-code', AuthController.sendOtpCode.bind(AuthController));
-router.post('/api/auth/verify-code', AuthController.verifyOtpCode.bind(AuthController));
+router.post('/api/auth/send-code', otpSendLimiter, AuthController.sendOtpCode.bind(AuthController));
+router.post('/api/auth/verify-code', otpVerifyLimiter, AuthController.verifyOtpCode.bind(AuthController));
 
 // ─── Roles & Permissions (RBAC) ──────────────────────────────────────────────
 

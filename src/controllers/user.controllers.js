@@ -64,8 +64,17 @@ class UserController {
    */
   async toggleAdmin(req, res) {
     try {
-      const user = await prisma.user.findUnique({ where: { id: req.params.id }, select: { isAdmin: true } });
+      const user = await prisma.user.findUnique({
+        where: { id: req.params.id },
+        select: { isAdmin: true, email: true },
+      });
       if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
+
+      if (isSuperOwner(user.email)) {
+        return res.status(403).json({
+          error: 'Este usuário é o Dono Supremo e não pode ter seu status admin alterado',
+        });
+      }
 
       const updated = await prisma.user.update({
         where: { id: req.params.id },

@@ -82,6 +82,7 @@ function buildCdnUrl(filename, req) {
 module.exports = {
   getPublicApiBaseUrl,
   buildCdnUrl,
+  extractCdnFilename,
   resolveMediaUrl,
   resolveMediaUrls,
   resolveEntityMedia,
