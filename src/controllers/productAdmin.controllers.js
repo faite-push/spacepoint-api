@@ -1,6 +1,12 @@
 const { prisma } = require('../config/prisma');
 const { sanitizeString, sanitizeSlug } = require('../utils/sanitize');
 const { syncDigitalStock } = require('../utils/digitalStock');
+const {
+  recordAdminAction,
+  AUDIT_ACTIONS,
+  requestContext,
+  buildPriceChangeMetadata,
+} = require('../services/auditLog.service');
 
 const DELIVERY_TYPES = ['automatic_lines', 'file', 'manual_chat', 'mixed', 'manual', 'automatic_text'];
 
@@ -355,6 +361,26 @@ class ProductAdminController {
 
         return product;
       });
+
+      const priceMetadata = buildPriceChangeMetadata(
+        existing,
+        {
+          price: updated.price,
+          comparePrice: updated.comparePrice,
+        },
+        { productName: existing.name }
+      );
+
+      if (priceMetadata) {
+        await recordAdminAction({
+          ...requestContext(req),
+          action: AUDIT_ACTIONS.PRODUCT_PRICE_CHANGE,
+          targetType: 'product',
+          targetId: id,
+          metadata: priceMetadata,
+        });
+      }
+
       return res.json(updated);
     } catch (err) {
       console.error('[ProductAdmin.update]', err);
@@ -582,6 +608,7 @@ class ProductAdminController {
 
         let updatedProducts = 0;
         let updatedVariants = 0;
+        const changes = [];
 
         await prisma.$transaction(async (tx) => {
           for (const product of products) {
@@ -604,6 +631,15 @@ class ProductAdminController {
             if (Object.keys(data).length) {
               await tx.product.update({ where: { id: product.id }, data });
               updatedProducts += 1;
+              changes.push({
+                entityType: 'product',
+                entityId: product.id,
+                oldPrice: priceBase,
+                newPrice: data.price != null ? Number(data.price) : undefined,
+                oldComparePrice: product.comparePrice == null ? null : compareBase,
+                newComparePrice:
+                  data.comparePrice != null ? Number(data.comparePrice) : undefined,
+              });
             }
           }
 
@@ -627,9 +663,38 @@ class ProductAdminController {
             if (Object.keys(data).length) {
               await tx.productVariant.update({ where: { id: variant.id }, data });
               updatedVariants += 1;
+              changes.push({
+                entityType: 'variant',
+                entityId: variant.id,
+                oldPrice: priceBase,
+                newPrice: data.price != null ? Number(data.price) : undefined,
+                oldComparePrice: variant.comparePrice == null ? null : compareBase,
+                newComparePrice:
+                  data.comparePrice != null ? Number(data.comparePrice) : undefined,
+              });
             }
           }
         });
+
+        if (changes.length) {
+          await recordAdminAction({
+            ...requestContext(req),
+            action: AUDIT_ACTIONS.PRODUCT_PRICE_BULK_CHANGE,
+            targetType: 'bulk',
+            targetId: null,
+            metadata: {
+              applyTo: applyToRaw,
+              targetField,
+              mode,
+              value,
+              alsoApplyToComparePrice,
+              productIds: ids,
+              updatedProducts,
+              updatedVariants,
+              changes: changes.slice(0, 200),
+            },
+          });
+        }
 
         return res.json({
           success: true,

@@ -5,6 +5,9 @@ const DEFAULT_REVIEWS_SETTINGS = {
   homeSubtitle: 'Experiências reais de quem já confiou na nossa loja',
   autoPublish: false,
   allowScreenshots: false,
+  autoCloseChatOnDelivery: true,
+  sendReviewInviteEmail: true,
+  reviewReminderHours: 24,
   opinionTags: ['Muito bom', 'Entrega rápida', 'Confiável', 'Voltarei a comprar', 'Ótimo suporte'],
 };
 
@@ -26,6 +29,12 @@ function normalizeReviewsSettings(raw) {
         : DEFAULT_REVIEWS_SETTINGS.homeSubtitle,
     autoPublish: raw.autoPublish === true,
     allowScreenshots: raw.allowScreenshots === true,
+    autoCloseChatOnDelivery: raw.autoCloseChatOnDelivery !== false,
+    sendReviewInviteEmail: raw.sendReviewInviteEmail !== false,
+    reviewReminderHours:
+      Number.isFinite(Number(raw.reviewReminderHours)) && Number(raw.reviewReminderHours) > 0
+        ? Math.min(168, Math.floor(Number(raw.reviewReminderHours)))
+        : DEFAULT_REVIEWS_SETTINGS.reviewReminderHours,
     opinionTags: Array.isArray(raw.opinionTags)
       ? raw.opinionTags.filter((tag) => typeof tag === 'string' && tag.trim()).slice(0, 30)
       : DEFAULT_REVIEWS_SETTINGS.opinionTags,

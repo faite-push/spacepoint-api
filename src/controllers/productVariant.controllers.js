@@ -5,6 +5,12 @@ const {
   syncDigitalStock,
   ensureDigitalStockSynced,
 } = require('../utils/digitalStock');
+const {
+  recordAdminAction,
+  AUDIT_ACTIONS,
+  requestContext,
+  buildPriceChangeMetadata,
+} = require('../services/auditLog.service');
 
 function parseDecimal(v) {
   if (v === undefined || v === null || v === "") return null;
@@ -125,6 +131,15 @@ const ProductVariantController = {
   async update(req, res) {
     try {
       const { variantId } = req.params;
+      const existing = await prisma.productVariant.findUnique({
+        where: { id: variantId },
+        include: { product: { select: { id: true, name: true } } },
+      });
+
+      if (!existing) {
+        return res.status(404).json({ error: "Variante não encontrada" });
+      }
+
       const data = buildData(req.body, undefined);
 
       const variant = await prisma.$transaction(async (tx) => {
@@ -147,6 +162,29 @@ const ProductVariantController = {
 
         return updated;
       });
+
+      const priceMetadata = buildPriceChangeMetadata(
+        existing,
+        {
+          price: variant.price,
+          comparePrice: variant.comparePrice,
+        },
+        {
+          productId: existing.productId,
+          productName: existing.product.name,
+          variantName: existing.name,
+        }
+      );
+
+      if (priceMetadata) {
+        await recordAdminAction({
+          ...requestContext(req),
+          action: AUDIT_ACTIONS.VARIANT_PRICE_CHANGE,
+          targetType: 'variant',
+          targetId: variantId,
+          metadata: priceMetadata,
+        });
+      }
 
       return res.json(variant);
     } catch (err) {

@@ -29,6 +29,7 @@ const ALL_PERMISSIONS = [
   { key: 'plugins:manage', name: 'Gerenciar Plugins', category: 'plugins' },
   { key: 'settings:manage', name: 'Gerenciar Configurações', category: 'settings' },
   { key: 'analytics:view', name: 'Ver Analytics', category: 'analytics' },
+  { key: 'audit:view', name: 'Ver Auditoria', category: 'settings' },
 ];
 
 const ADMIN_ROLE_PERMISSIONS = [
@@ -43,7 +44,7 @@ const ADMIN_ROLE_PERMISSIONS = [
   'users:view', 'users:edit',
   'roles:view',
   'pages:manage', 'gateways:manage', 'plugins:manage', 'settings:manage',
-  'analytics:view',
+  'analytics:view', 'audit:view',
 ];
 
 const MODERATOR_ROLE_PERMISSIONS = [

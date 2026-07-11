@@ -1,5 +1,9 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const { prisma } = require('../config/prisma');
+const {
+  countUniqueVisitors,
+  listVisitsInRange,
+  listAllVisitsBefore,
+} = require('../services/analytics.service');
 
 /**
  * Helpers de datas.
@@ -55,6 +59,7 @@ class AdminStatsController {
         usersCurr, usersPrev,
         paidOrdersCount, pendingOrdersCount,
         totalItemsSold,
+        visitsCurr, visitsPrev,
       ] = await Promise.all([
         prisma.payment.aggregate({ _sum: { amount: true }, where: { status: 'PAID', createdAt: { gte: dateStart, lt: dateEnd } } }),
         prisma.payment.aggregate({ _sum: { amount: true }, where: { status: 'PAID', createdAt: { gte: prevStart, lt: prevEnd } } }),
@@ -65,6 +70,8 @@ class AdminStatsController {
         prisma.order.count({ where: { status: { in: ['PAID', 'DELIVERED'] }, createdAt: { gte: dateStart, lt: dateEnd } } }),
         prisma.order.count({ where: { status: 'PENDING', createdAt: { gte: dateStart, lt: dateEnd } } }),
         prisma.orderItem.aggregate({ _sum: { quantity: true }, where: { order: { status: { in: ['PAID', 'DELIVERED'] }, createdAt: { gte: dateStart, lt: dateEnd } } } }),
+        countUniqueVisitors(dateStart, dateEnd),
+        countUniqueVisitors(prevStart, prevEnd),
       ]);
 
       const revValue = revenueCurr._sum.amount ?? 0;
@@ -74,15 +81,15 @@ class AdminStatsController {
       const ticketValue = salesCount > 0 ? Math.floor(revValue / salesCount) : 0;
       const ticketPrevValue = salesPrevCount > 0 ? Math.floor(revPrevValue / salesPrevCount) : 0;
 
-      // Mocked visits for UI (Visits = Sales * 15 approx)
-      const visitsValue = salesCount * 12 + 45;
-      const visitsPrevValue = salesPrevCount * 12 + 30;
+      const visitsValue = visitsCurr;
+      const visitsPrevValue = visitsPrev;
 
       // ─── Charts Data ───────────────────────────────────────────────────
-      const [payments, ordersLocal, orderItems] = await Promise.all([
+      const [payments, ordersLocal, orderItems, visitsInRange] = await Promise.all([
         prisma.payment.findMany({ where: { status: 'PAID', createdAt: { gte: dateStart, lt: dateEnd } }, select: { amount: true, createdAt: true, userId: true, provider: true } }),
         prisma.order.findMany({ where: { status: { in: ['PAID', 'DELIVERED'] }, createdAt: { gte: dateStart, lt: dateEnd } }, select: { id: true, createdAt: true, userId: true } }),
         prisma.orderItem.findMany({ where: { order: { status: { in: ['PAID', 'DELIVERED'] }, createdAt: { gte: dateStart, lt: dateEnd } } }, select: { quantity: true, order: { select: { createdAt: true } } } }),
+        listVisitsInRange(dateStart, dateEnd),
       ]);
 
       // Decide bucket granularity based on period length
@@ -104,6 +111,9 @@ class AdminStatsController {
           sales: 0,
           unitsSold: 0,
           uniqueCustomers: new Set(),
+          returningCustomers: new Set(),
+          uniqueVisitors: new Set(),
+          returningVisitors: new Set(),
         });
         // Advance by 7 days for weekly, 1 day for daily
         if (useWeeklyBuckets) {
@@ -148,16 +158,63 @@ class AdminStatsController {
         if (b) b.unitsSold += item.quantity;
       }
 
-      // Customer tracking
-      const userOrdersCount = {};
-      for (const o of ordersLocal) {
-        userOrdersCount[o.userId] = (userOrdersCount[o.userId] || 0) + 1;
+      const allVisitorFirstSeen = {};
+      const allVisitsBeforeEnd = await listAllVisitsBefore(dateEnd);
+
+      for (const visit of allVisitsBeforeEnd) {
+        if (!allVisitorFirstSeen[visit.visitorId]) {
+          allVisitorFirstSeen[visit.visitorId] = visit.createdAt;
+        }
+      }
+
+      for (const visit of visitsInRange) {
+        const k = getBucketKey(visit.createdAt);
+        const b = bucketMap.get(k);
+        if (!b) continue;
+
+        b.uniqueVisitors.add(visit.visitorId);
+
+        const bucketStart = new Date(b.date);
+        const firstSeen = allVisitorFirstSeen[visit.visitorId];
+        if (firstSeen && firstSeen < bucketStart) {
+          b.returningVisitors.add(visit.visitorId);
+        }
+      }
+
+      const priorOrders = await prisma.order.findMany({
+        where: {
+          status: { in: ['PAID', 'DELIVERED'] },
+          createdAt: { lt: dateEnd },
+        },
+        select: { userId: true, createdAt: true },
+        orderBy: { createdAt: 'asc' },
+      });
+
+      const firstOrderByUser = {};
+      for (const order of priorOrders) {
+        if (!order.userId || firstOrderByUser[order.userId]) continue;
+        firstOrderByUser[order.userId] = order.createdAt;
+      }
+
+      for (const order of ordersLocal) {
+        if (!order.userId) continue;
+        const k = getBucketKey(order.createdAt);
+        const b = bucketMap.get(k);
+        if (!b) continue;
+
+        const firstOrder = firstOrderByUser[order.userId];
+        const bucketStart = new Date(b.date);
+        if (firstOrder && firstOrder < bucketStart) {
+          b.returningCustomers.add(order.userId);
+        }
       }
 
       const finalChart = buckets.map(b => ({
         ...b,
         uniqueCustomers: b.uniqueCustomers.size,
-        returningCustomers: Math.floor(b.uniqueCustomers.size * 0.2),
+        returningCustomers: b.returningCustomers.size,
+        uniqueVisitors: b.uniqueVisitors.size,
+        returningVisitors: b.returningVisitors.size,
         revenue: b.revenue / 100
       }));
 
@@ -253,7 +310,11 @@ class AdminStatsController {
         },
         charts: {
           performance: finalChart,
-          customers: finalChart.map(f => ({ label: f.label, unique: f.uniqueCustomers, returning: f.returningCustomers })),
+          customers: finalChart.map(f => ({
+            label: f.label,
+            unique: f.uniqueVisitors,
+            returning: f.returningVisitors,
+          })),
         },
         sidebar: {
           conversion: { total: revValue, approvedCount: paidOrdersCount, pendingCount: pendingOrdersCount, approvedPct },

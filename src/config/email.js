@@ -1,14 +1,4 @@
-const nodemailer = require('nodemailer');
-
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || 'smtp.gmail.com',
-  port: parseInt(process.env.SMTP_PORT || '587'),
-  secure: false,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-});
+const emailService = require('../services/email.service');
 
 const sendOtpEmail = async (to, code) => {
   const html = `
@@ -23,12 +13,7 @@ const sendOtpEmail = async (to, code) => {
     </div>
   `;
 
-  await transporter.sendMail({
-    from: process.env.SMTP_FROM || 'Space Point <noreply@spacepoint.com>',
-    to,
-    subject: 'Seu código de verificação - Space Point',
-    html,
-  });
+  await emailService.sendEmail(to, 'Seu código de verificação - Space Point', html);
 };
 
 module.exports = { sendOtpEmail };

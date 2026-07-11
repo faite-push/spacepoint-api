@@ -10,6 +10,13 @@ const { getReviewsSettings } = require('../utils/reviewsSettings');
 const { signChatFileUrl, signChatMessageFileUrls } = require('../utils/cdnSignedUrl');
 const { userHasPermission } = require('../middleware/permissionMiddleware');
 const { claimOneCodeForDelivery } = require('../services/orderFulfillment.service');
+const { finalizeOrderDelivery, emitDeliverySideEffects } = require('../services/orderDelivery.service');
+const orderEmailService = require('../services/orderEmail.service');
+const {
+  recordAdminAction,
+  AUDIT_ACTIONS,
+  requestContext,
+} = require('../services/auditLog.service');
 
 const ORDER_LIST_INCLUDE = {
   user: { select: { id: true, name: true, email: true, image: true } },
@@ -240,6 +247,8 @@ class ChatController {
 
       linesToDeliver = linesToDeliver.slice(0, pending);
 
+      let deliveryResult = null;
+
       await prisma.$transaction(async (tx) => {
         for (const line of linesToDeliver) {
           let deliveryContent = line;
@@ -316,30 +325,34 @@ class ChatController {
           data: { updatedAt: new Date() },
         });
 
-        const allItems = await tx.orderItem.findMany({
-          where: { orderId: chat.orderId },
-          include: { codes: { where: { status: 'DELIVERED' } } },
-        });
+        deliveryResult = await finalizeOrderDelivery(tx, chat.orderId);
+      });
 
-        const allDelivered = allItems.every(
-          (i) => i.codes.filter((c) => c.status === 'DELIVERED').length >= i.quantity
-        );
+      if (deliveryResult?.changed) {
+        await emitDeliverySideEffects(deliveryResult);
+      }
 
-        if (allDelivered) {
-          await tx.order.update({
-            where: { id: chat.orderId },
-            data: { status: 'DELIVERED' },
-          });
-
-          await tx.chatMessage.create({
-            data: {
-              chatId: chat.id,
-              senderId: 'SYSTEM',
-              content: 'Seu pedido foi entregue com sucesso. Aproveite!',
-              type: 'AUTOMATED',
-            },
-          });
-        }
+      await recordAdminAction({
+        ...requestContext(req),
+        action: AUDIT_ACTIONS.ORDER_ITEM_DELIVERED,
+        targetType: 'order_item',
+        targetId: itemId,
+        metadata: {
+          orderId: chat.orderId,
+          chatId: chat.id,
+          productId: item.productId,
+          productName: item.product.name,
+          variantId: item.variantId,
+          deliveryType,
+          mode,
+          useStock,
+          quantityDelivered: linesToDeliver.length,
+          pendingBefore: pending,
+          pendingAfter: pending - linesToDeliver.length,
+          orderFullyDelivered: Boolean(deliveryResult?.changed),
+          orderStatusAfter: deliveryResult?.order?.status ?? chat.order.status,
+          hasSensitiveContent: linesToDeliver.length > 0,
+        },
       });
 
       const updatedChat = await prisma.chat.findUnique({
@@ -1231,28 +1244,82 @@ class ChatController {
 
   async listPublishedStoreReviews(req, res) {
     try {
-      const reviews = await prisma.chat.findMany({
-        where: { rating: { not: null }, reviewStatus: 'PUBLISHED' },
-        include: {
-          order: {
-            include: {
-              user: { select: { id: true, name: true, email: true, image: true } },
+      const productSlug = String(req.query.productSlug || '').trim();
+      const productIdParam = String(req.query.productId || '').trim();
+      const page = Math.max(1, Number(req.query.page) || 1);
+      const limit = Math.min(50, Math.max(1, Number(req.query.limit) || (productSlug || productIdParam ? 10 : 30)));
+      const skip = (page - 1) * limit;
+
+      let productId = productIdParam || null;
+      if (!productId && productSlug) {
+        const product = await prisma.product.findUnique({
+          where: { slug: productSlug },
+          select: { id: true },
+        });
+        if (!product) {
+          return res.json({
+            reviews: [],
+            summary: { averageRating: 0, total: 0, distribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 } },
+            pagination: { page, limit, total: 0, totalPages: 1 },
+          });
+        }
+        productId = product.id;
+      }
+
+      const where = {
+        rating: { not: null },
+        reviewStatus: 'PUBLISHED',
+        ...(productId
+          ? {
+            order: {
               items: {
-                include: {
-                  product: {
-                    select: { id: true, name: true, imageUrl: true, price: true, slug: true },
-                  },
+                some: { productId },
+              },
+            },
+          }
+          : {}),
+      };
+
+      const include = {
+        order: {
+          include: {
+            user: { select: { id: true, name: true, email: true, image: true } },
+            items: {
+              include: {
+                product: {
+                  select: { id: true, name: true, imageUrl: true, price: true, slug: true },
                 },
+                variant: { select: { id: true, name: true } },
               },
             },
           },
         },
-        orderBy: { updatedAt: 'desc' },
-        take: 30,
-      });
+      };
 
-      const payload = reviews.map((review) => {
-        const product = review.order?.items?.[0]?.product;
+      const [total, reviews, allRatings] = await Promise.all([
+        prisma.chat.count({ where }),
+        prisma.chat.findMany({
+          where,
+          include,
+          orderBy: { updatedAt: 'desc' },
+          skip,
+          take: limit,
+        }),
+        productId
+          ? prisma.chat.findMany({
+            where,
+            select: { rating: true },
+          })
+          : Promise.resolve([]),
+      ]);
+
+      const mapReview = (review) => {
+        const items = review.order?.items ?? [];
+        const matchedItem = productId
+          ? items.find((item) => item.productId === productId)
+          : items[0];
+        const product = matchedItem?.product ?? items[0]?.product;
+        const variantName = matchedItem?.variantName || matchedItem?.variant?.name || null;
         const customer = review.isAnonymousRating
           ? 'Cliente verificado'
           : (review.order?.user?.name || review.order?.user?.email || 'Cliente');
@@ -1266,19 +1333,53 @@ class ChatController {
           tags: Array.isArray(review.ratingTags) ? review.ratingTags : [],
           sellerResponse: review.sellerResponse,
           dateLabel: review.updatedAt,
+          variantName,
           product: product
             ? {
-                id: product.id,
-                name: product.name,
-                imageUrl: product.imageUrl,
-                price: Number(product.price),
-                slug: product.slug,
-              }
+              id: product.id,
+              name: product.name,
+              imageUrl: product.imageUrl,
+              price: Number(product.price),
+              slug: product.slug,
+            }
             : null,
         };
-      });
+      };
 
-      return res.json({ reviews: payload });
+      const payload = reviews.map(mapReview);
+
+      let summary = null;
+      if (productId) {
+        const distribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+        let sum = 0;
+        for (const row of allRatings) {
+          const rating = Math.min(5, Math.max(1, Number(row.rating) || 0));
+          sum += rating;
+          distribution[rating] += 1;
+        }
+        summary = {
+          averageRating: total ? Math.round((sum / total) * 10) / 10 : 0,
+          total,
+          distribution,
+        };
+      }
+
+      const response = {
+        reviews: payload,
+        ...(summary ? { summary } : {}),
+        ...(productId
+          ? {
+            pagination: {
+              page,
+              limit,
+              total,
+              totalPages: Math.max(1, Math.ceil(total / limit)),
+            },
+          }
+          : {}),
+      };
+
+      return res.json(response);
     } catch (err) {
       console.error('[ChatController.listPublishedStoreReviews]', err);
       return res.status(500).json({ error: 'Erro ao listar avaliações' });

@@ -25,6 +25,7 @@ router.get('/v2/api/admin/orders/:id', authenticate, requireAdmin, requirePermis
 router.patch('/v2/api/admin/orders/bulk-status', authenticate, requireAdmin, requirePermission('orders:manage'), csrf, OrderController.bulkUpdateStatus.bind(OrderController));
 router.patch('/v2/api/admin/orders/:id/status', authenticate, requireAdmin, requirePermission('orders:manage'), csrf, OrderController.updateStatus.bind(OrderController));
 router.patch('/v2/api/admin/orders/:id/notes', authenticate, requireAdmin, requirePermission('orders:manage'), csrf, OrderController.updateNotes.bind(OrderController));
+router.post('/v2/api/admin/orders/:id/refund', authenticate, requireAdmin, requirePermission('orders:refund'), csrf, OrderController.refund.bind(OrderController));
 router.post('/v2/api/admin/orders/:id/mark-paid', authenticate, requireAdmin, requirePermission('orders:manage'), csrf, OrderController.markPaidAndDeliver.bind(OrderController));
 
 module.exports = router;

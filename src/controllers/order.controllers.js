@@ -14,11 +14,15 @@ const {
   notifyOrderChatCreated,
   cancelOrder,
 } = require('../services/orderFulfillment.service');
+const { finalizeOrderDelivery, emitDeliverySideEffects } = require('../services/orderDelivery.service');
+const orderEmailService = require('../services/orderEmail.service');
 const {
   getCheckoutPaymentOptions,
   getOrCreateCheckoutPayment,
   syncPendingOrderPayment,
 } = require('../services/payment.service');
+const { processOrderRefund } = require('../services/refund.service');
+const cartService = require('../services/cart.service');
 
 class OrderController {
   async paymentOptions(req, res) {
@@ -191,6 +195,9 @@ class OrderController {
         return created;
       });
 
+      orderEmailService.notifyOrderCreated(order.id);
+      cartService.markConverted({ userId }).catch(() => {});
+
       return res.status(201).json({ order });
     } catch (err) {
       return res.status(400).json({ error: err.message || 'Falha ao criar pedido' });
@@ -202,6 +209,14 @@ class OrderController {
       where: { userId: req.user.id },
       orderBy: { createdAt: 'desc' },
       include: {
+        chat: {
+          select: {
+            id: true,
+            status: true,
+            rating: true,
+            reviewStatus: true,
+          },
+        },
         items: {
           include: {
             product: {
@@ -233,6 +248,14 @@ class OrderController {
         where: { id },
         include: {
           user: { select: { email: true, name: true } },
+          chat: {
+            select: {
+              id: true,
+              status: true,
+              rating: true,
+              reviewStatus: true,
+            },
+          },
           items: {
             include: {
               product: { select: { name: true, imageUrl: true, slug: true, price: true } },
@@ -252,6 +275,10 @@ class OrderController {
         if (order.paymentExpiresAt && new Date(order.paymentExpiresAt) < new Date()) {
           await prisma.$transaction((tx) => cancelOrder(tx, order.id, 'Expirado por falta de pagamento'));
           order.status = 'CANCELLED';
+          orderEmailService.notifyOrderCancelled(order.id, {
+            reason: 'Expirado por falta de pagamento',
+            expired: true,
+          });
         } else {
           await syncPendingOrderPayment(order.id);
 
@@ -294,6 +321,7 @@ class OrderController {
       );
 
       notifyOrderChatCreated(order);
+      orderEmailService.notifyPaymentConfirmed(order.id);
 
       return res.json({ order });
     } catch (err) {
@@ -388,10 +416,21 @@ class OrderController {
         where: { id },
         include: {
           user: { select: { name: true, email: true, image: true } },
+          payments: {
+            orderBy: { createdAt: 'desc' },
+            select: {
+              id: true,
+              status: true,
+              provider: true,
+              amount: true,
+              externalId: true,
+              createdAt: true,
+            },
+          },
           items: {
             include: {
               product: { select: { name: true, imageUrl: true } },
-              codes: { select: { code: true, deliveredAt: true } },
+              codes: { select: { code: true, deliveredAt: true, status: true } },
             },
           },
         },
@@ -416,6 +455,7 @@ class OrderController {
         createdAt: order.createdAt,
         paidAt: order.paidAt,
         adminNotes: order.adminNotes,
+        payments: order.payments,
         items: order.items.map((it) => ({
           id: it.id,
           quantity: it.quantity,
@@ -478,10 +518,10 @@ class OrderController {
               description: 'Pagamento aprovado via admin',
             });
           }
-          return tx.order.update({
-            where: { id },
-            data: { status: 'DELIVERED' },
-          });
+          const deliveryResult = await finalizeOrderDelivery(tx, id, { force: true });
+          const updated = await tx.order.findUnique({ where: { id } });
+          if (updated) updated._deliveryResult = deliveryResult;
+          return updated;
         }
 
         return tx.order.update({
@@ -492,6 +532,17 @@ class OrderController {
 
       if (status === 'PAID') {
         notifyOrderChatCreated(order);
+        orderEmailService.notifyPaymentConfirmed(order.id);
+      } else if (status === 'DELIVERED') {
+        if (order?._deliveryResult) {
+          await emitDeliverySideEffects(order._deliveryResult);
+        } else {
+          orderEmailService.notifyOrderDelivered(order.id);
+        }
+      } else if (status === 'CANCELLED') {
+        orderEmailService.notifyOrderCancelled(order.id, {
+          reason: 'Cancelado pelo administrador',
+        });
       }
 
       return res.json(order);
@@ -531,12 +582,35 @@ class OrderController {
 
       for (const order of paidOrders) {
         notifyOrderChatCreated(order);
+        orderEmailService.notifyPaymentConfirmed(order.id);
+      }
+
+      if (status === 'CANCELLED') {
+        for (const id of ids) {
+          orderEmailService.notifyOrderCancelled(id, {
+            reason: 'Cancelado em massa pelo administrador',
+          });
+        }
       }
 
       return res.json({ success: true });
     } catch (err) {
       console.error('[OrderController.bulkUpdateStatus]', err);
       return res.status(400).json({ error: err.message || 'Erro ao atualizar pedidos em massa' });
+    }
+  }
+
+  async refund(req, res) {
+    try {
+      const { id } = req.params;
+      const reason = sanitizeString(req.body?.reason || '', 500);
+      const skipGateway = Boolean(req.body?.skipGateway);
+
+      const result = await processOrderRefund(id, { reason, skipGateway, req });
+      return res.json(result);
+    } catch (err) {
+      console.error('[OrderController.refund]', err);
+      return res.status(400).json({ error: err.message || 'Erro ao processar reembolso' });
     }
   }
 }

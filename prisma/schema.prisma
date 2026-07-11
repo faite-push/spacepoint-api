@@ -26,6 +26,10 @@ model User {
   couponUsages CouponUsage[]
   orders       Order[]
   payments     Payment[]
+  wishlistItems WishlistItem[]
+  newsletterSubscriptions NewsletterSubscriber[]
+  abandonedCart AbandonedCart?
+  adminAuditLogs AdminAuditLog[]
   role         Role?         @relation(fields: [roleId], references: [id])
   assignedChats Chat[]       @relation("ChatAssignee")
 
@@ -92,6 +96,8 @@ model Product {
   codes                    ProductCode[]
   variants                 ProductVariant[]
   showcaseSections         HomeShowcaseSectionProduct[]
+  wishlistItems            WishlistItem[]
+  abandonedCartItems       AbandonedCartItem[]
 
   @@index([slug])
   @@index([categoryId])
@@ -125,6 +131,7 @@ model ProductVariant {
   updatedAt                DateTime      @updatedAt
   orderItems               OrderItem[]
   codes                    ProductCode[]
+  abandonedCartItems       AbandonedCartItem[]
   product                  Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   @@index([productId, sortOrder])
@@ -157,6 +164,7 @@ model Order {
   createdAt        DateTime     @default(now())
   updatedAt        DateTime     @updatedAt
   paidAt           DateTime?
+  deliveredAt      DateTime?
   adminNotes       String?
   discount         Int          @default(0)
   paymentExpiresAt DateTime?
@@ -279,6 +287,7 @@ model SiteConfig {
   chatAutomatedMessages       String?
   pluginsConfig               Json?
   reviewsSettings             Json?
+  abandonedCartSettings       Json?
 }
 
 model InstitutionalPage {
@@ -343,6 +352,68 @@ model HomeShowcaseSectionProduct {
 
   @@unique([sectionId, productId])
   @@index([sectionId, sortOrder])
+  @@index([productId])
+}
+
+model WishlistItem {
+  id        String   @id @default(cuid())
+  userId    String
+  productId String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+  @@index([userId, createdAt])
+}
+
+model NewsletterSubscriber {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  source    String   @default("home")
+  userId    String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([isActive, createdAt])
+  @@index([userId])
+}
+
+model AbandonedCart {
+  id                  String              @id @default(cuid())
+  userId              String?             @unique
+  visitorId           String?             @unique
+  email               String?
+  customerName        String?
+  couponCode          String?
+  subtotalCents       Int                 @default(0)
+  lastActivityAt      DateTime            @default(now())
+  recoveryEmailSentAt DateTime?
+  convertedAt         DateTime?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  user                User?               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items               AbandonedCartItem[]
+
+  @@index([email, lastActivityAt])
+  @@index([recoveryEmailSentAt, lastActivityAt, convertedAt])
+  @@index([convertedAt])
+}
+
+model AbandonedCartItem {
+  id        String          @id @default(cuid())
+  cartId    String
+  productId String
+  variantId String?
+  quantity  Int
+  unitPrice Int
+  cart      AbandonedCart   @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  product   Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  @@index([cartId])
   @@index([productId])
 }
 
@@ -491,6 +562,8 @@ model Chat {
   isAnonymousRating    Boolean       @default(false)
   reviewStatus         String?
   sellerResponse       String?
+  reviewInviteSentAt   DateTime?
+  reviewReminderSentAt DateTime?
   assignedToId         String?
   firstAdminResponseAt DateTime?
   createdAt            DateTime      @default(now())
@@ -546,6 +619,38 @@ model ChatMacro {
   category  String   @default("geral")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+model StoreVisit {
+  id        String   @id @default(cuid())
+  visitorId String
+  userId    String?
+  path      String
+  referrer  String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([visitorId, createdAt])
+  @@index([path, createdAt])
+}
+
+model AdminAuditLog {
+  id          String   @id @default(cuid())
+  action      String
+  actorUserId String?
+  targetType  String?
+  targetId    String?
+  metadata    Json?
+  ip          String?
+  userAgent   String?
+  createdAt   DateTime @default(now())
+  actor       User?    @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([action, createdAt])
+  @@index([actorUserId, createdAt])
+  @@index([targetType, targetId])
+  @@index([createdAt])
 }
 
 enum DeliveryType {

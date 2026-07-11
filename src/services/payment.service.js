@@ -13,6 +13,7 @@ const {
   handlePagBankWebhook,
   handleStripeWebhook,
 } = require('./gatewayProviders.service');
+const orderEmailService = require('./orderEmail.service');
 
 const PIX_EXPIRATION_SECONDS = 30 * 60;
 const SUPPORTED_CHECKOUT_METHODS = ['PIX', 'CARD'];
@@ -112,6 +113,8 @@ async function createDevMockPix(order) {
       metadata,
     },
   });
+
+  orderEmailService.notifyPaymentPending(order.id, metadata);
 
   return metadata;
 }

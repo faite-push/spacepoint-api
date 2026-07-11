@@ -2,6 +2,8 @@ const { prisma } = require('../config/prisma');
 const { resolveSellable } = require('../utils/productStore');
 const { syncAutomaticStockFromCodes } = require('../utils/digitalStock');
 const { initializeChatForPaidOrder } = require('./chat.service');
+const orderEmailService = require('./orderEmail.service');
+const { finalizeOrderDelivery, emitDeliverySideEffects } = require('./orderDelivery.service');
 
 const ORDER_PAYMENT_TTL_MS = 30 * 60 * 1000;
 
@@ -204,6 +206,91 @@ async function deliverOrderItem(tx, item) {
   await syncAutomaticStockFromCodes(tx, item.productId, item.variantId ?? null);
 }
 
+/**
+ * Reverte estoque ao reembolsar: reservados voltam, entregues são invalidados.
+ */
+async function reverseOrderInventoryOnRefund(tx, orderId) {
+  const items = await tx.orderItem.findMany({
+    where: { orderId },
+    include: { codes: { select: { id: true, code: true, status: true } } },
+  });
+
+  for (const item of items) {
+    await tx.productCode.updateMany({
+      where: { orderItemId: item.id, status: 'RESERVED' },
+      data: { status: 'AVAILABLE', orderItemId: null },
+    });
+
+    const deliveredCodes = item.codes.filter((c) => c.status === 'DELIVERED');
+    for (const code of deliveredCodes) {
+      await tx.productCode.update({
+        where: { id: code.id },
+        data: { status: 'REFUNDED' },
+      });
+
+      if (item.variantId) {
+        const variant = await tx.productVariant.findUnique({
+          where: { id: item.variantId },
+          select: { digitalLines: true },
+        });
+        if (variant?.digitalLines?.includes(code.code)) {
+          await tx.productVariant.update({
+            where: { id: item.variantId },
+            data: { digitalLines: variant.digitalLines.filter((line) => line !== code.code) },
+          });
+        }
+      } else {
+        const product = await tx.product.findUnique({
+          where: { id: item.productId },
+          select: { digitalLines: true },
+        });
+        if (product?.digitalLines?.includes(code.code)) {
+          await tx.product.update({
+            where: { id: item.productId },
+            data: { digitalLines: product.digitalLines.filter((line) => line !== code.code) },
+          });
+        }
+      }
+    }
+
+    const variant = item.variantId
+      ? await tx.productVariant.findUnique({
+        where: { id: item.variantId },
+        select: { deliveryType: true },
+      })
+      : null;
+    const product = await tx.product.findUnique({
+      where: { id: item.productId },
+      select: { deliveryType: true },
+    });
+    const deliveryType = variant?.deliveryType ?? product?.deliveryType;
+
+    if (deliveryType === 'automatic_lines' || deliveryType === 'mixed') {
+      await syncAutomaticStockFromCodes(tx, item.productId, item.variantId ?? null);
+    } else {
+      const undeliveredQty = Math.max(0, item.quantity - deliveredCodes.length);
+      if (undeliveredQty > 0) {
+        if (item.variantId) {
+          await tx.productVariant.update({
+            where: { id: item.variantId },
+            data: { stockQuantity: { increment: undeliveredQty } },
+          });
+        } else {
+          await tx.product.update({
+            where: { id: item.productId },
+            data: { stockQuantity: { increment: undeliveredQty } },
+          });
+        }
+      }
+    }
+
+    await tx.orderItem.update({
+      where: { id: item.id },
+      data: { stockReserved: 0 },
+    });
+  }
+}
+
 async function releaseOrderStock(tx, orderId) {
   const items = await tx.orderItem.findMany({ where: { orderId } });
 
@@ -337,10 +424,19 @@ async function fulfillPaidOrder(tx, orderId, paymentMeta = {}) {
     console.error('[fulfillPaidOrder] Failed to initialize chat', err);
   }
 
+  const deliveryResult = await finalizeOrderDelivery(tx, current.id);
+  if (deliveryResult.changed) {
+    updatedOrder._deliveryResult = deliveryResult;
+  }
+
   return updatedOrder;
 }
 
 function notifyOrderChatCreated(order) {
+  if (order?._deliveryResult) {
+    emitDeliverySideEffects(order._deliveryResult);
+  }
+
   if (!order?._wsChatId) return;
 
   setImmediate(async () => {
@@ -404,6 +500,10 @@ async function expireStalePendingOrders() {
   for (const { id } of stale) {
     try {
       await prisma.$transaction((tx) => cancelOrder(tx, id, 'Expirado por falta de pagamento'));
+      orderEmailService.notifyOrderCancelled(id, {
+        reason: 'Expirado por falta de pagamento',
+        expired: true,
+      });
     } catch (err) {
       console.error('[expireStalePendingOrders]', id, err.message);
     }
@@ -464,10 +564,12 @@ module.exports = {
   ORDER_PAYMENT_TTL_MS,
   reserveStockForOrderItem,
   releaseOrderStock,
+  reverseOrderInventoryOnRefund,
   deliverOrderItem,
   claimOneCodeForDelivery,
   fulfillPaidOrder,
   cancelOrder,
   notifyOrderChatCreated,
+  emitDeliverySideEffects,
   expireStalePendingOrders,
 };

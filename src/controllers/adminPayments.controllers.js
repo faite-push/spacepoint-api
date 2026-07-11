@@ -1,5 +1,5 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const { prisma } = require('../config/prisma');
+const { processPaymentRefund } = require('../services/refund.service');
 
 class AdminPaymentsController {
   /**
@@ -26,10 +26,10 @@ class AdminPaymentsController {
           orderBy: { createdAt: 'desc' },
           include: {
             user: { select: { name: true, email: true } },
-            order: { select: { id: true, status: true } }
-          }
+            order: { select: { id: true, status: true } },
+          },
         }),
-        prisma.payment.count({ where })
+        prisma.payment.count({ where }),
       ]);
 
       return res.json({
@@ -37,8 +37,8 @@ class AdminPaymentsController {
         meta: {
           total,
           page: parseInt(page),
-          lastPage: Math.ceil(total / limit)
-        }
+          lastPage: Math.ceil(total / limit),
+        },
       });
     } catch (err) {
       console.error('[AdminPayments.list]', err);
@@ -56,12 +56,12 @@ class AdminPaymentsController {
         where: { id },
         include: {
           user: { select: { name: true, email: true, balance: true } },
-          order: { 
-            include: { 
-              items: { include: { product: { select: { name: true } } } } 
-            } 
-          }
-        }
+          order: {
+            include: {
+              items: { include: { product: { select: { name: true } } } },
+            },
+          },
+        },
       });
 
       if (!payment) return res.status(404).json({ error: 'Pagamento não encontrado' });
@@ -79,21 +79,17 @@ class AdminPaymentsController {
   async refund(req, res) {
     try {
       const { id } = req.params;
-      const payment = await prisma.payment.findUnique({ where: { id } });
+      const reason = String(req.body?.reason || '').trim().slice(0, 500);
+      const skipGateway = Boolean(req.body?.skipGateway);
 
-      if (!payment) return res.status(404).json({ error: 'Pagamento não encontrado' });
-      if (payment.status !== 'PAID') return res.status(400).json({ error: 'Apenas pagamentos pagos podem ser reembolsados' });
-
-      // Atualiza pagamento e pedido
-      await prisma.$transaction([
-        prisma.payment.update({ where: { id }, data: { status: 'REFUNDED' } }),
-        ...(payment.orderId ? [prisma.order.update({ where: { id: payment.orderId }, data: { status: 'REFUNDED' } })] : [])
-      ]);
-
-      return res.json({ message: 'Pagamento reembolsado com sucesso' });
+      const result = await processPaymentRefund(id, { reason, skipGateway, req });
+      return res.json({
+        message: 'Pagamento reembolsado com sucesso',
+        ...result,
+      });
     } catch (err) {
       console.error('[AdminPayments.refund]', err);
-      return res.status(500).json({ error: 'Erro ao processar reembolso' });
+      return res.status(400).json({ error: err.message || 'Erro ao processar reembolso' });
     }
   }
 }

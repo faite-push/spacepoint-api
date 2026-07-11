@@ -8,6 +8,8 @@
     "dev": "dotenv -e .env.local -- nodemon index.js",
     "start": "dotenv -e .env -- node index.js",
     "postinstall": "prisma generate",
+    "prisma:push": "dotenv -e .env.local -- prisma db push",
+    "prisma:generate": "prisma generate",
     "lint": "eslint src/",
     "create-admin-local": "dotenv -e .env.local -- node scripts/create-admin-local.js"
   },

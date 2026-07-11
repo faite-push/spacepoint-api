@@ -7,6 +7,7 @@ const {
 } = require('../config/pagbank.config');
 const { resolveEfiCertificate } = require('./gatewayValidation.service');
 const { fulfillPaidOrder, notifyOrderChatCreated } = require('./orderFulfillment.service');
+const orderEmailService = require('./orderEmail.service');
 const { resolveCustomerFromOrder } = require('../utils/checkoutConfig');
 
 const PIX_EXPIRATION_SECONDS = 30 * 60;
@@ -70,6 +71,7 @@ async function savePixPayment(order, provider, externalId, metadata) {
       metadata,
     },
   });
+  orderEmailService.notifyPaymentPending(order.id, metadata);
   return metadata;
 }
 
@@ -86,6 +88,7 @@ async function saveCardPayment(order, provider, externalId, metadata) {
       metadata,
     },
   });
+  orderEmailService.notifyPaymentPending(order.id, metadata);
   return metadata;
 }
 
@@ -613,7 +616,10 @@ async function markPaymentPaid(payment, paidCents, description) {
     fulfilled = true;
   });
 
-  if (orderResult) notifyOrderChatCreated(orderResult);
+  if (orderResult && fulfilled) {
+    notifyOrderChatCreated(orderResult);
+    orderEmailService.notifyPaymentConfirmed(orderResult.id);
+  }
   return fulfilled;
 }
 
