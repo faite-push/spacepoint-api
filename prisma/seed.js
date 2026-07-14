@@ -1,16 +1,11 @@
 const { PrismaClient } = require('@prisma/client');
-const {
-  ALL_PERMISSIONS,
-  ADMIN_ROLE_PERMISSIONS,
-  MODERATOR_ROLE_PERMISSIONS,
-} = require('../src/config/permissions');
+const { ALL_PERMISSIONS, ADMIN_ROLE_PERMISSIONS, MODERATOR_ROLE_PERMISSIONS, } = require('../src/config/permissions');
 
 const prisma = new PrismaClient();
 
 async function main() {
   console.log('🌱 Starting seed...');
 
-  // ─── Seed Permissions ─────────────────────────────────────────────────────
   console.log('📋 Seeding permissions...');
 
   for (const perm of ALL_PERMISSIONS) {
@@ -23,7 +18,6 @@ async function main() {
 
   console.log(`✅ ${ALL_PERMISSIONS.length} permissions seeded`);
 
-  // ─── Seed Super Owner Role ────────────────────────────────────────────────
   console.log('👑 Creating Super Owner role...');
 
   const superOwnerRole = await prisma.role.upsert({
@@ -51,7 +45,6 @@ async function main() {
   console.log(`✅ Super Owner role created: ${superOwnerRole.id}`);
   console.log(`   Permissions: ${superOwnerRole.permissions.length}`);
 
-  // ─── Assign Super Owner to specified email ────────────────────────────────
   const superAdminEmail = process.env.SUPER_ADMIN_EMAIL;
 
   if (superAdminEmail) {
@@ -79,7 +72,6 @@ async function main() {
     console.log('   Set it to automatically assign Super Owner role to a user');
   }
 
-  // ─── Seed default roles ─────────────────────────────────────────────────
   console.log('🎭 Creating default roles...');
 
   const adminRole = await prisma.role.upsert({
@@ -121,12 +113,10 @@ async function main() {
   console.log('\n🎉 Seed completed!');
 }
 
-main()
-  .then(async () => {
-    await prisma.$disconnect();
-  })
-  .catch(async (e) => {
-    console.error('❌ Seed failed:', e);
-    await prisma.$disconnect();
-    process.exit(1);
-  });
+main().then(async () => {
+  await prisma.$disconnect();
+}).catch(async (e) => {
+  console.error('❌ Seed failed:', e);
+  await prisma.$disconnect();
+  process.exit(1);
+});

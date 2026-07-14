@@ -1,4 +1,3 @@
-/** Fonte única de permissões do painel admin (seed + API de cargos). */
 const ALL_PERMISSIONS = [
   { key: 'products:view', name: 'Ver Produtos', category: 'products' },
   { key: 'products:create', name: 'Criar Produtos', category: 'products' },

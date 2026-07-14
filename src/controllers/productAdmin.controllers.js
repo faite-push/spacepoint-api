@@ -102,7 +102,7 @@ class ProductAdminController {
       const categoryId = sanitizeString(req.query.categoryId || '', 60);
       const visibility = sanitizeString(req.query.visibility || '', 20); // visible|hidden|all
       const page = clampInt(req.query.page, 1, 1);
-      const pageSize = clampInt(req.query.pageSize, 25, 1, 100);
+      const pageSize = clampInt(req.query.pageSize, 25, 1, 2000);
 
       const where = {
         ...(search

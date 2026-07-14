@@ -2,33 +2,7 @@ const { prisma } = require('../config/prisma');
 const { sanitizeString } = require('../utils/sanitize');
 
 const DEFAULT_REVIEWS = [
-  {
-    name: 'Gabriel Mendonça',
-    avatarUrl: 'https://i.pravatar.cc/80?img=12',
-    rating: 5,
-    comment:
-      'Comprei um jogo de PS5 e chegou super rápido! Produto original, ativação sem problemas. Muito confiável, já virei cliente fiel.',
-    dateLabel: 'há 2 semanas',
-    sortOrder: 0,
-  },
-  {
-    name: 'Aline Ferreira',
-    avatarUrl: 'https://i.pravatar.cc/80?img=47',
-    rating: 5,
-    comment:
-      'Atendimento excelente e entrega imediata. Sempre compro aqui quando quero jogos com preço justo. Recomendo 100%!',
-    dateLabel: 'há 1 mês',
-    sortOrder: 1,
-  },
-  {
-    name: 'Lucas Rodrigues',
-    avatarUrl: 'https://i.pravatar.cc/80?img=33',
-    rating: 5,
-    comment:
-      'Melhor loja de jogos digitais que conheço. Fui atendido prontamente, tirei todas as dúvidas e o código funcionou de primeira.',
-    dateLabel: 'há 3 semanas',
-    sortOrder: 2,
-  },
+  
 ];
 
 async function ensureDefaultReviews() {

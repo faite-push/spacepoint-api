@@ -1,7 +1,3 @@
-/**
- * Shared cookie options for auth tokens.
- * On localhost over HTTP, Secure + SameSite=None cookies are rejected by browsers.
- */
 function resolveCookieSettings() {
   const apiUrl = process.env.API_PUBLIC_URL || process.env.API_URL || '';
   const isLocalHost = /localhost|127\.0\.0\.1/i.test(apiUrl);
