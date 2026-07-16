@@ -25,6 +25,33 @@ const {
 const { processOrderRefund } = require('../services/refund.service');
 const cartService = require('../services/cart.service');
 
+function buildItemsPreview(items, totalCount) {
+  if (!items?.length) {
+    return totalCount > 0 ? `${totalCount} item(ns)` : 'Sem itens';
+  }
+
+  const first = items[0];
+  const name = first.variant?.name
+    ? `${first.product.name} — ${first.variant.name}`
+    : first.variantName || first.product?.name || 'Produto';
+  const line = `${first.quantity}x ${name}`;
+  if (totalCount > 1) return `${line} +${totalCount - 1}`;
+  return line;
+}
+
+function formatPaymentProvider(provider) {
+  if (!provider) return null;
+  const map = {
+    'efi-bank': 'Efi Bank',
+    'efi-pix': 'Efi Bank',
+    'mercado-pago': 'Mercado Pago',
+    pagbank: 'PagBank',
+    stripe: 'Stripe',
+    'manual-admin': 'Manual',
+  };
+  return map[provider] || provider.replace(/-/g, ' ');
+}
+
 class OrderController {
   async paymentOptions(req, res) {
     try {
@@ -358,6 +385,18 @@ class OrderController {
           include: {
             user: { select: { name: true, email: true } },
             _count: { select: { items: true } },
+            items: {
+              take: 1,
+              include: {
+                product: { select: { name: true } },
+                variant: { select: { name: true } },
+              },
+            },
+            payments: {
+              take: 1,
+              orderBy: { createdAt: 'desc' },
+              select: { provider: true, status: true },
+            },
           },
           orderBy: { createdAt: 'desc' },
           skip,
@@ -384,10 +423,12 @@ class OrderController {
         customerName: o.user?.name || 'Cliente',
         customerEmail: o.user?.email || 'N/A',
         paymentMethod: o.paymentMethod || (o.idempotencyKey ? 'Online' : 'Manual'),
+        paymentProvider: formatPaymentProvider(o.payments?.[0]?.provider),
         couponCode: o.couponCode,
         createdAt: o.createdAt,
         paidAt: o.paidAt,
         itemsCount: o._count.items,
+        itemsPreview: buildItemsPreview(o.items, o._count.items),
       }));
 
       return res.json({

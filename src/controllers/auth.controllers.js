@@ -2,6 +2,7 @@ const { generateToken } = require('../config/jwt');
 const { prisma } = require('../config/prisma');
 const { sendOtpEmail } = require('../config/email');
 const { isSuperOwner } = require('../utils/auth');
+const { touchLastAccess } = require('../services/userAccess.service');
 const { COOKIE_BASE } = require('../config/cookies');
 const axios = require('axios');
 const crypto = require('crypto');
@@ -175,6 +176,8 @@ class AuthController {
       });
 
       if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
+
+      touchLastAccess(user.id);
 
       let csrfToken = req.cookies?.csrf_token;
       if (!csrfToken) {
