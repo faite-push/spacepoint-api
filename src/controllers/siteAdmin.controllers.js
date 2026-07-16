@@ -1,7 +1,10 @@
 const { prisma } = require('../config/prisma');
 const { sanitizeString } = require('../utils/sanitize');
 const { normalizeCheckoutSettings } = require('../utils/checkoutConfig');
+const { normalizePluginsConfig, mergePreservedPluginSecrets } = require('../utils/pluginsConfig');
+const { maskPluginsConfigForAdmin } = require('../utils/publicPluginsConfig');
 const { ensureDefaultPageSeo, ensureDefaultReviews } = require('./homeReview.controllers');
+const { userHasPermission } = require('../middleware/permissionMiddleware');
 const {
   recordAdminAction,
   AUDIT_ACTIONS,
@@ -166,6 +169,7 @@ class SiteAdminController {
         config: {
           ...config,
           checkoutSettings: normalizeCheckoutSettings(config.checkoutSettings),
+          pluginsConfig: maskPluginsConfigForAdmin(config.pluginsConfig),
         },
         institutionalPages: pages,
       });
@@ -275,19 +279,25 @@ class SiteAdminController {
         data.checkoutSettings = normalizeCheckoutSettings(body.checkoutSettings);
       }
 
-      if (body.pluginsConfig !== undefined) {
-        data.pluginsConfig =
-          body.pluginsConfig && typeof body.pluginsConfig === 'object' && !Array.isArray(body.pluginsConfig)
-            ? body.pluginsConfig
-            : null;
-      }
-
       if (body.reviewsSettings !== undefined) {
         const { normalizeReviewsSettings } = require('../utils/reviewsSettings');
         data.reviewsSettings = normalizeReviewsSettings(body.reviewsSettings);
       }
 
       const previous = await prisma.siteConfig.findUnique({ where: { id: 'default' } });
+
+      if (body.pluginsConfig !== undefined) {
+        const canManagePlugins = await userHasPermission(req.user?.id, 'plugins:manage');
+        if (!canManagePlugins) {
+          return res.status(403).json({
+            error: "Acesso negado: falta a permissão 'plugins:manage'",
+          });
+        }
+        data.pluginsConfig = mergePreservedPluginSecrets(
+          normalizePluginsConfig(body.pluginsConfig),
+          previous?.pluginsConfig
+        );
+      }
 
       const config = await prisma.siteConfig.upsert({
         where: { id: 'default' },
@@ -354,7 +364,10 @@ class SiteAdminController {
         });
       }
 
-      return res.json(config);
+      return res.json({
+        ...config,
+        pluginsConfig: maskPluginsConfigForAdmin(config.pluginsConfig),
+      });
     } catch (err) {
       console.error('[SiteAdmin.updateSettings]', err);
       return res.status(500).json({ error: 'Erro ao salvar configurações do site' });

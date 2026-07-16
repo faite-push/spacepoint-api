@@ -8,6 +8,7 @@ const {
 const { resolveEfiCertificate } = require('./gatewayValidation.service');
 const { fulfillPaidOrder, notifyOrderChatCreated } = require('./orderFulfillment.service');
 const orderEmailService = require('./orderEmail.service');
+const { emitOrderPaidSideEffects } = require('./orderPaidSideEffects.service');
 const { resolveCustomerFromOrder } = require('../utils/checkoutConfig');
 
 const PIX_EXPIRATION_SECONDS = 30 * 60;
@@ -619,6 +620,7 @@ async function markPaymentPaid(payment, paidCents, description) {
   if (orderResult && fulfilled) {
     notifyOrderChatCreated(orderResult);
     orderEmailService.notifyPaymentConfirmed(orderResult.id);
+    emitOrderPaidSideEffects(orderResult.id);
   }
   return fulfilled;
 }

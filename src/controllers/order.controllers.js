@@ -16,6 +16,7 @@ const {
 } = require('../services/orderFulfillment.service');
 const { finalizeOrderDelivery, emitDeliverySideEffects } = require('../services/orderDelivery.service');
 const orderEmailService = require('../services/orderEmail.service');
+const { emitOrderPaidSideEffects } = require('../services/orderPaidSideEffects.service');
 const {
   getCheckoutPaymentOptions,
   getOrCreateCheckoutPayment,
@@ -322,6 +323,7 @@ class OrderController {
 
       notifyOrderChatCreated(order);
       orderEmailService.notifyPaymentConfirmed(order.id);
+      emitOrderPaidSideEffects(order.id);
 
       return res.json({ order });
     } catch (err) {
@@ -533,6 +535,7 @@ class OrderController {
       if (status === 'PAID') {
         notifyOrderChatCreated(order);
         orderEmailService.notifyPaymentConfirmed(order.id);
+        emitOrderPaidSideEffects(order.id);
       } else if (status === 'DELIVERED') {
         if (order?._deliveryResult) {
           await emitDeliverySideEffects(order._deliveryResult);
@@ -583,6 +586,7 @@ class OrderController {
       for (const order of paidOrders) {
         notifyOrderChatCreated(order);
         orderEmailService.notifyPaymentConfirmed(order.id);
+        emitOrderPaidSideEffects(order.id);
       }
 
       if (status === 'CANCELLED') {

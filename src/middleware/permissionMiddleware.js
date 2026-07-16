@@ -1,5 +1,6 @@
 const { prisma } = require('../config/prisma');
 const { isSuperOwner } = require('../utils/auth');
+const { FULL_ACCESS_PERMISSION } = require('../config/permissions');
 
 async function loadUserPermissions(userId) {
   return prisma.user.findUnique({
@@ -14,12 +15,21 @@ async function loadUserPermissions(userId) {
   });
 }
 
+function permissionKeysFromUser(user) {
+  return user?.role?.permissions?.map((p) => p.key) || [];
+}
+
+function userKeysAllow(permissionKeys, permissionKey) {
+  if (permissionKeys.includes(FULL_ACCESS_PERMISSION)) return true;
+  return permissionKeys.includes(permissionKey);
+}
+
 async function userHasPermission(userId, permissionKey) {
   const user = await loadUserPermissions(userId);
   if (!user) return false;
   if (isSuperOwner(user.email)) return true;
   if (!user.role) return false;
-  return user.role.permissions.some((p) => p.key === permissionKey);
+  return userKeysAllow(permissionKeysFromUser(user), permissionKey);
 }
 
 /**
@@ -34,7 +44,6 @@ const requirePermission = (permissionKey) => {
         return res.status(401).json({ error: 'Não autenticado' });
       }
 
-      // Busca usuário com seu cargo e permissões
       const user = await prisma.user.findUnique({
         where: { id: userId },
         include: {
@@ -50,20 +59,16 @@ const requirePermission = (permissionKey) => {
         return res.status(404).json({ error: 'Usuário não encontrado' });
       }
 
-      // 1. Dono Supremo sempre tem permissão
       if (isSuperOwner(user.email)) {
         return next();
       }
 
-      // 2. Se não tem cargo, não tem permissão
       if (!user.role) {
         return res.status(403).json({ error: 'Acesso negado: você não possui um cargo atribuído' });
       }
 
-      // 3. Verifica se a permissão existe no cargo do usuário
-      const hasPermission = user.role.permissions.some(p => p.key === permissionKey);
-
-      if (!hasPermission) {
+      const keys = permissionKeysFromUser(user);
+      if (!userKeysAllow(keys, permissionKey)) {
         return res.status(403).json({ error: `Acesso negado: falta a permissão '${permissionKey}'` });
       }
 
@@ -109,8 +114,12 @@ const requireAnyPermission = (...permissionKeys) => {
         return res.status(403).json({ error: 'Acesso negado: você não possui um cargo atribuído' });
       }
 
-      const userKeys = new Set(user.role.permissions.map((p) => p.key));
-      const allowed = permissionKeys.some((key) => userKeys.has(key));
+      const keys = permissionKeysFromUser(user);
+      if (keys.includes(FULL_ACCESS_PERMISSION)) {
+        return next();
+      }
+
+      const allowed = permissionKeys.some((key) => keys.includes(key));
 
       if (!allowed) {
         return res.status(403).json({
@@ -129,3 +138,4 @@ const requireAnyPermission = (...permissionKeys) => {
 module.exports = requirePermission;
 module.exports.any = requireAnyPermission;
 module.exports.userHasPermission = userHasPermission;
+module.exports.FULL_ACCESS_PERMISSION = FULL_ACCESS_PERMISSION;

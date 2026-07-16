@@ -1,5 +1,9 @@
 const { prisma } = require('../config/prisma');
-const { ALL_PERMISSIONS } = require('../config/permissions');
+const {
+  ALL_PERMISSIONS,
+  groupPermissions,
+  FULL_ACCESS_PERMISSION,
+} = require('../config/permissions');
 const { isSuperOwner } = require('../utils/auth');
 const {
   recordAdminAction,
@@ -15,6 +19,32 @@ const hasSuperOwnerPermission = async (userId) => {
   return isSuperOwner(user?.email);
 };
 
+async function ensurePermissionsSynced() {
+  for (const perm of ALL_PERMISSIONS) {
+    await prisma.permission.upsert({
+      where: { key: perm.key },
+      update: { name: perm.name, category: perm.category },
+      create: perm,
+    });
+  }
+
+  const protectedRoles = await prisma.role.findMany({
+    where: { isProtected: true },
+    select: { id: true },
+  });
+
+  for (const role of protectedRoles) {
+    await prisma.role.update({
+      where: { id: role.id },
+      data: {
+        permissions: {
+          set: ALL_PERMISSIONS.map((p) => ({ key: p.key })),
+        },
+      },
+    });
+  }
+}
+
 // ─── Role Controller ────────────────────────────────────────────────────────
 
 class RoleController {
@@ -22,18 +52,11 @@ class RoleController {
 
   async getAllPermissions(req, res) {
     try {
-      // Group permissions by category
-      const grouped = ALL_PERMISSIONS.reduce((acc, perm) => {
-        if (!acc[perm.category]) {
-          acc[perm.category] = [];
-        }
-        acc[perm.category].push(perm);
-        return acc;
-      }, {});
-
+      await ensurePermissionsSynced();
       return res.json({
         permissions: ALL_PERMISSIONS,
-        grouped,
+        grouped: groupPermissions(ALL_PERMISSIONS),
+        fullAccessPermission: FULL_ACCESS_PERMISSION,
       });
     } catch (err) {
       console.error('[getAllPermissions Error]', err);
