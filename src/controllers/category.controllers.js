@@ -2,6 +2,12 @@ const { prisma } = require('../config/prisma');
 const { sanitizeString, sanitizeSlug } = require('../utils/sanitize');
 const { mapProductsForStore, visibleVariantWhere } = require('../utils/productStore');
 const { resolveEntityMedia } = require('../utils/mediaUrl');
+const {
+  recordAdminAction,
+  AUDIT_ACTIONS,
+  requestContext,
+  collectFieldChanges,
+} = require('../services/auditLog.service');
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -259,6 +265,15 @@ class CategoryController {
           parentId: parentId || null,
         },
       });
+
+      await recordAdminAction({
+        ...requestContext(req),
+        action: AUDIT_ACTIONS.CATEGORY_CREATE,
+        targetType: 'category',
+        targetId: created.id,
+        metadata: { categoryName: created.name, parentId: created.parentId || null },
+      });
+
       return res.status(201).json(created);
     } catch (err) {
       console.error('[Category.create]', err);
@@ -312,6 +327,32 @@ class CategoryController {
       }
 
       const updated = await prisma.category.update({ where: { id }, data });
+
+      const changes = collectFieldChanges(existing, updated, [
+        'name',
+        'isActive',
+        'showInNavbar',
+        'showInFooter',
+        'parentId',
+        'imageUrl',
+        'bannerUrl',
+      ]);
+
+      if (changes.length) {
+        await recordAdminAction({
+          ...requestContext(req),
+          action: AUDIT_ACTIONS.CATEGORY_UPDATE,
+          targetType: 'category',
+          targetId: id,
+          metadata: {
+            categoryName: updated.name,
+            oldName: existing.name,
+            newName: updated.name,
+            changes,
+          },
+        });
+      }
+
       return res.json(updated);
     } catch (err) {
       console.error('[Category.update]', err);
@@ -366,6 +407,15 @@ class CategoryController {
       }
 
       await prisma.category.delete({ where: { id } });
+
+      await recordAdminAction({
+        ...requestContext(req),
+        action: AUDIT_ACTIONS.CATEGORY_DELETE,
+        targetType: 'category',
+        targetId: id,
+        metadata: { categoryName: existing.name },
+      });
+
       return res.json({ success: true });
     } catch (err) {
       console.error('[Category.remove]', err);

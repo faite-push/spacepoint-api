@@ -10,6 +10,7 @@ const {
   AUDIT_ACTIONS,
   requestContext,
   buildPriceChangeMetadata,
+  collectFieldChanges,
 } = require('../services/auditLog.service');
 
 function parseDecimal(v) {
@@ -121,6 +122,24 @@ const ProductVariantController = {
         return created;
       });
 
+      const product = await prisma.product.findUnique({
+        where: { id: productId },
+        select: { name: true },
+      });
+
+      await recordAdminAction({
+        ...requestContext(req),
+        action: AUDIT_ACTIONS.VARIANT_CREATE,
+        targetType: 'variant',
+        targetId: variant.id,
+        metadata: {
+          productId,
+          productName: product?.name || null,
+          variantName: variant.name,
+          price: Number(variant.price),
+        },
+      });
+
       return res.status(201).json(variant);
     } catch (err) {
       console.error("[ProductVariant.create]", err);
@@ -163,6 +182,26 @@ const ProductVariantController = {
         return updated;
       });
 
+      const ctx = requestContext(req);
+      const productName = existing.product.name;
+      const displayName = variant.name || existing.name;
+
+      if (data.name !== undefined && existing.name !== variant.name) {
+        await recordAdminAction({
+          ...ctx,
+          action: AUDIT_ACTIONS.VARIANT_NAME_CHANGE,
+          targetType: 'variant',
+          targetId: variantId,
+          metadata: {
+            productId: existing.productId,
+            productName,
+            oldName: existing.name,
+            newName: variant.name,
+            variantName: variant.name,
+          },
+        });
+      }
+
       const priceMetadata = buildPriceChangeMetadata(
         existing,
         {
@@ -171,18 +210,40 @@ const ProductVariantController = {
         },
         {
           productId: existing.productId,
-          productName: existing.product.name,
-          variantName: existing.name,
+          productName,
+          variantName: displayName,
         }
       );
 
       if (priceMetadata) {
         await recordAdminAction({
-          ...requestContext(req),
+          ...ctx,
           action: AUDIT_ACTIONS.VARIANT_PRICE_CHANGE,
           targetType: 'variant',
           targetId: variantId,
           metadata: priceMetadata,
+        });
+      }
+
+      const otherChanges = collectFieldChanges(existing, variant, [
+        'isActive',
+        'isVisible',
+        'deliveryType',
+        'stockQuantity',
+      ]);
+
+      if (otherChanges.length) {
+        await recordAdminAction({
+          ...ctx,
+          action: AUDIT_ACTIONS.VARIANT_UPDATE,
+          targetType: 'variant',
+          targetId: variantId,
+          metadata: {
+            productId: existing.productId,
+            productName,
+            variantName: displayName,
+            changes: otherChanges,
+          },
         });
       }
 
@@ -199,7 +260,29 @@ const ProductVariantController = {
   async remove(req, res) {
     try {
       const { variantId } = req.params;
+      const existing = await prisma.productVariant.findUnique({
+        where: { id: variantId },
+        include: { product: { select: { id: true, name: true } } },
+      });
+      if (!existing) {
+        return res.status(404).json({ error: "Variante não encontrada" });
+      }
+
       await prisma.productVariant.delete({ where: { id: variantId } });
+
+      await recordAdminAction({
+        ...requestContext(req),
+        action: AUDIT_ACTIONS.VARIANT_DELETE,
+        targetType: 'variant',
+        targetId: variantId,
+        metadata: {
+          productId: existing.productId,
+          productName: existing.product?.name || null,
+          variantName: existing.name,
+          price: Number(existing.price),
+        },
+      });
+
       return res.status(204).send();
     } catch (err) {
       if (err.code === "P2025") {

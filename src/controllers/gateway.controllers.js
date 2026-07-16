@@ -6,6 +6,11 @@ const {
   getGatewayActiveMethods,
   hasAnyActiveMethod,
 } = require('../config/gatewayCapabilities');
+const {
+  recordAdminAction,
+  AUDIT_ACTIONS,
+  requestContext,
+} = require('../services/auditLog.service');
 
 const prisma = new PrismaClient();
 
@@ -91,6 +96,8 @@ class GatewayController {
         }
       }
 
+      const existing = await prisma.gatewayConfig.findUnique({ where: { slug } });
+
       const gateway = await prisma.gatewayConfig.upsert({
         where: { slug },
         update: {
@@ -103,6 +110,19 @@ class GatewayController {
           name,
           config,
           isActive: isActive ?? false,
+        },
+      });
+
+      await recordAdminAction({
+        ...requestContext(req),
+        action: AUDIT_ACTIONS.GATEWAY_UPDATE,
+        targetType: 'gateway',
+        targetId: slug,
+        metadata: {
+          gatewayName: gateway.name || slug,
+          oldActive: existing?.isActive ?? null,
+          newActive: gateway.isActive,
+          configUpdated: Boolean(config),
         },
       });
 
@@ -126,6 +146,18 @@ class GatewayController {
           name: slug,
           config: {},
           isActive,
+        },
+      });
+
+      await recordAdminAction({
+        ...requestContext(req),
+        action: AUDIT_ACTIONS.GATEWAY_UPDATE,
+        targetType: 'gateway',
+        targetId: slug,
+        metadata: {
+          gatewayName: gateway.name || slug,
+          newActive: gateway.isActive,
+          toggled: true,
         },
       });
 

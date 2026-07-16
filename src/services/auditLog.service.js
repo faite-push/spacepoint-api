@@ -3,10 +3,72 @@ const { sanitizeString } = require('../utils/sanitize');
 
 const AUDIT_ACTIONS = {
   ORDER_REFUND: 'ORDER_REFUND',
-  PRODUCT_PRICE_CHANGE: 'PRODUCT_PRICE_CHANGE',
-  VARIANT_PRICE_CHANGE: 'VARIANT_PRICE_CHANGE',
-  PRODUCT_PRICE_BULK_CHANGE: 'PRODUCT_PRICE_BULK_CHANGE',
   ORDER_ITEM_DELIVERED: 'ORDER_ITEM_DELIVERED',
+
+  PRODUCT_CREATE: 'PRODUCT_CREATE',
+  PRODUCT_DELETE: 'PRODUCT_DELETE',
+  PRODUCT_NAME_CHANGE: 'PRODUCT_NAME_CHANGE',
+  PRODUCT_PRICE_CHANGE: 'PRODUCT_PRICE_CHANGE',
+  PRODUCT_UPDATE: 'PRODUCT_UPDATE',
+  PRODUCT_PRICE_BULK_CHANGE: 'PRODUCT_PRICE_BULK_CHANGE',
+
+  VARIANT_CREATE: 'VARIANT_CREATE',
+  VARIANT_DELETE: 'VARIANT_DELETE',
+  VARIANT_NAME_CHANGE: 'VARIANT_NAME_CHANGE',
+  VARIANT_PRICE_CHANGE: 'VARIANT_PRICE_CHANGE',
+  VARIANT_UPDATE: 'VARIANT_UPDATE',
+
+  CATEGORY_CREATE: 'CATEGORY_CREATE',
+  CATEGORY_UPDATE: 'CATEGORY_UPDATE',
+  CATEGORY_DELETE: 'CATEGORY_DELETE',
+
+  COUPON_CREATE: 'COUPON_CREATE',
+  COUPON_UPDATE: 'COUPON_UPDATE',
+  COUPON_DELETE: 'COUPON_DELETE',
+
+  ROLE_CREATE: 'ROLE_CREATE',
+  ROLE_UPDATE: 'ROLE_UPDATE',
+  ROLE_DELETE: 'ROLE_DELETE',
+  TEAM_ROLE_ASSIGN: 'TEAM_ROLE_ASSIGN',
+
+  PLUGIN_UPDATE: 'PLUGIN_UPDATE',
+  SETTINGS_UPDATE: 'SETTINGS_UPDATE',
+  GATEWAY_UPDATE: 'GATEWAY_UPDATE',
+  BANNER_CREATE: 'BANNER_CREATE',
+  BANNER_UPDATE: 'BANNER_UPDATE',
+  BANNER_DELETE: 'BANNER_DELETE',
+};
+
+const ACTION_LABELS = {
+  ORDER_REFUND: 'Reembolso de pedido',
+  ORDER_ITEM_DELIVERED: 'Entrega manual',
+  PRODUCT_CREATE: 'Produto criado',
+  PRODUCT_DELETE: 'Produto excluído',
+  PRODUCT_NAME_CHANGE: 'Nome de produto',
+  PRODUCT_PRICE_CHANGE: 'Preço de produto',
+  PRODUCT_UPDATE: 'Produto atualizado',
+  PRODUCT_PRICE_BULK_CHANGE: 'Preço em massa',
+  VARIANT_CREATE: 'Variante criada',
+  VARIANT_DELETE: 'Variante excluída',
+  VARIANT_NAME_CHANGE: 'Nome de variante',
+  VARIANT_PRICE_CHANGE: 'Preço de variante',
+  VARIANT_UPDATE: 'Variante atualizada',
+  CATEGORY_CREATE: 'Categoria criada',
+  CATEGORY_UPDATE: 'Categoria atualizada',
+  CATEGORY_DELETE: 'Categoria excluída',
+  COUPON_CREATE: 'Cupom criado',
+  COUPON_UPDATE: 'Cupom atualizado',
+  COUPON_DELETE: 'Cupom excluído',
+  ROLE_CREATE: 'Cargo criado',
+  ROLE_UPDATE: 'Cargo atualizado',
+  ROLE_DELETE: 'Cargo excluído',
+  TEAM_ROLE_ASSIGN: 'Cargo da equipe',
+  PLUGIN_UPDATE: 'Plugin alterado',
+  SETTINGS_UPDATE: 'Configurações',
+  GATEWAY_UPDATE: 'Gateway atualizado',
+  BANNER_CREATE: 'Banner criado',
+  BANNER_UPDATE: 'Banner atualizado',
+  BANNER_DELETE: 'Banner excluído',
 };
 
 function requestContext(req) {
@@ -76,6 +138,32 @@ function buildPriceChangeMetadata(existing, next, extra = {}) {
   return changed ? metadata : null;
 }
 
+function fieldChanged(before, after) {
+  if (after === undefined) return false;
+  if (before == null && after == null) return false;
+  if (typeof before === 'object' || typeof after === 'object') {
+    try {
+      return JSON.stringify(before ?? null) !== JSON.stringify(after ?? null);
+    } catch {
+      return before !== after;
+    }
+  }
+  return before !== after;
+}
+
+function collectFieldChanges(existing, next, fields) {
+  const changes = [];
+  for (const field of fields) {
+    if (!fieldChanged(existing[field], next[field])) continue;
+    changes.push({
+      field,
+      old: existing[field] ?? null,
+      new: next[field] ?? null,
+    });
+  }
+  return changes;
+}
+
 async function listAdminAuditLogs({
   action,
   actorUserId,
@@ -101,18 +189,40 @@ async function listAdminAuditLogs({
     if (to) where.createdAt.lte = new Date(to);
   }
 
-  const [rows, total] = await Promise.all([
+  const [rows, total, actorIds] = await Promise.all([
     prisma.adminAuditLog.findMany({
       where,
       orderBy: { createdAt: 'desc' },
       skip,
       take: pageSize,
       include: {
-        actor: { select: { id: true, name: true, email: true, image: true } },
+        actor: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            image: true,
+            role: { select: { name: true } },
+          },
+        },
       },
     }),
     prisma.adminAuditLog.count({ where }),
+    prisma.adminAuditLog.findMany({
+      where: { actorUserId: { not: null } },
+      distinct: ['actorUserId'],
+      select: { actorUserId: true },
+      take: 200,
+    }),
   ]);
+
+  const actors = actorIds.length
+    ? await prisma.user.findMany({
+        where: { id: { in: actorIds.map((r) => r.actorUserId).filter(Boolean) } },
+        select: { id: true, name: true, email: true, image: true },
+        orderBy: { name: 'asc' },
+      })
+    : [];
 
   return {
     logs: rows.map((row) => ({
@@ -125,6 +235,7 @@ async function listAdminAuditLogs({
       createdAt: row.createdAt,
       actor: row.actor,
     })),
+    actors,
     pagination: {
       page: pageNum,
       limit: pageSize,
@@ -136,8 +247,11 @@ async function listAdminAuditLogs({
 
 module.exports = {
   AUDIT_ACTIONS,
+  ACTION_LABELS,
   requestContext,
   recordAdminAction,
   buildPriceChangeMetadata,
+  collectFieldChanges,
+  fieldChanged,
   listAdminAuditLogs,
 };

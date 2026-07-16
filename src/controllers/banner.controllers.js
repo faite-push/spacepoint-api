@@ -1,4 +1,9 @@
 const { prisma } = require('../config/prisma');
+const {
+  recordAdminAction,
+  AUDIT_ACTIONS,
+  requestContext,
+} = require('../services/auditLog.service');
 
 class BannerController {
   async list(req, res) {
@@ -30,6 +35,14 @@ class BannerController {
         },
       });
 
+      await recordAdminAction({
+        ...requestContext(req),
+        action: AUDIT_ACTIONS.BANNER_CREATE,
+        targetType: 'banner',
+        targetId: newBanner.id,
+        metadata: { imageUrl: newBanner.imageUrl, linkUrl: newBanner.linkUrl },
+      });
+
       return res.status(201).json(newBanner);
     } catch (err) {
       console.error('[ERRO] Ao criar banner:', err);
@@ -53,6 +66,18 @@ class BannerController {
         },
       });
 
+      await recordAdminAction({
+        ...requestContext(req),
+        action: AUDIT_ACTIONS.BANNER_UPDATE,
+        targetType: 'banner',
+        targetId: id,
+        metadata: {
+          imageUrl: updated.imageUrl,
+          linkUrl: updated.linkUrl,
+          isActive: updated.isActive,
+        },
+      });
+
       return res.json(updated);
     } catch (err) {
       console.error('[ERRO] Ao atualizar banner:', err);
@@ -66,6 +91,14 @@ class BannerController {
       if (!id) return res.status(400).json({ error: 'ID ausente' });
 
       await prisma.banner.delete({ where: { id } });
+
+      await recordAdminAction({
+        ...requestContext(req),
+        action: AUDIT_ACTIONS.BANNER_DELETE,
+        targetType: 'banner',
+        targetId: id,
+        metadata: {},
+      });
 
       return res.json({ message: 'Banner deletado com sucesso' });
     } catch (err) {

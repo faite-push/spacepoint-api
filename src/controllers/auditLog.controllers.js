@@ -1,5 +1,5 @@
 const { sanitizeString } = require('../utils/sanitize');
-const { listAdminAuditLogs, AUDIT_ACTIONS } = require('../services/auditLog.service');
+const { listAdminAuditLogs, AUDIT_ACTIONS, ACTION_LABELS } = require('../services/auditLog.service');
 
 class AuditLogController {
   async list(req, res) {
@@ -25,6 +25,7 @@ class AuditLogController {
       return res.json({
         ...result,
         actions: Object.values(AUDIT_ACTIONS),
+        actionLabels: ACTION_LABELS,
       });
     } catch (err) {
       console.error('[AuditLog.list]', err);

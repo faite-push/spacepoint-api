@@ -1,4 +1,9 @@
 const { prisma } = require('../config/prisma');
+const {
+  recordAdminAction,
+  AUDIT_ACTIONS,
+  requestContext,
+} = require('../services/auditLog.service');
 
 class CouponController {
   async list(req, res) {
@@ -84,20 +89,116 @@ class CouponController {
   async get(req, res) {
     try {
       const { id } = req.params;
+      const { from, to, search, status } = req.query;
+      const page = Math.max(1, Number(req.query.page) || 1);
+      const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+      const skip = (page - 1) * limit;
+
       const coupon = await prisma.coupon.findUnique({
         where: { id },
         include: {
           references: true,
-          usages: {
-            take: 10,
-            orderBy: { createdAt: 'desc' },
-            include: { user: { select: { name: true, email: true } }, order: true }
-          }
-        }
+          _count: { select: { usages: true } },
+        },
       });
 
       if (!coupon) return res.status(404).json({ error: 'Cupom não encontrado' });
-      return res.json(coupon);
+
+      const dateFilter = {};
+      if (from || to) {
+        dateFilter.createdAt = {};
+        if (from) dateFilter.createdAt.gte = new Date(String(from));
+        if (to) dateFilter.createdAt.lte = new Date(String(to));
+      }
+
+      const statsWhere = { couponId: id, ...dateFilter };
+
+      const salesWhere = {
+        couponId: id,
+        ...dateFilter,
+      };
+
+      const searchTerm = String(search || '').trim();
+      if (searchTerm) {
+        salesWhere.OR = [
+          { orderId: { contains: searchTerm, mode: 'insensitive' } },
+          { user: { name: { contains: searchTerm, mode: 'insensitive' } } },
+          { user: { email: { contains: searchTerm, mode: 'insensitive' } } },
+        ];
+      }
+
+      const statusFilter = String(status || '').trim().toUpperCase();
+      if (statusFilter && statusFilter !== 'ALL') {
+        salesWhere.order = { status: statusFilter };
+      }
+
+      const [totalUses, aggregated, usagesForConverted, salesTotal, sales] = await Promise.all([
+        prisma.couponUsage.count({ where: statsWhere }),
+        prisma.couponUsage.aggregate({
+          where: statsWhere,
+          _sum: { discount: true },
+        }),
+        prisma.couponUsage.findMany({
+          where: statsWhere,
+          select: { order: { select: { total: true } } },
+        }),
+        prisma.couponUsage.count({ where: salesWhere }),
+        prisma.couponUsage.findMany({
+          where: salesWhere,
+          orderBy: { createdAt: 'desc' },
+          skip,
+          take: limit,
+          include: {
+            user: { select: { id: true, name: true, email: true, image: true } },
+            order: {
+              select: {
+                id: true,
+                status: true,
+                total: true,
+                subtotal: true,
+                discount: true,
+                paymentMethod: true,
+                createdAt: true,
+                paidAt: true,
+              },
+            },
+          },
+        }),
+      ]);
+
+      const totalConvertedCents = usagesForConverted.reduce(
+        (acc, curr) => acc + (curr.order?.total || 0),
+        0
+      );
+
+      return res.json({
+        coupon,
+        stats: {
+          totalUses,
+          totalDiscounted: Number(aggregated._sum.discount || 0),
+          totalConverted: totalConvertedCents / 100,
+        },
+        sales: sales.map((usage) => ({
+          id: usage.id,
+          discount: Number(usage.discount),
+          createdAt: usage.createdAt,
+          user: usage.user,
+          order: usage.order
+            ? {
+                ...usage.order,
+                total: usage.order.total,
+                subtotal: usage.order.subtotal,
+                discount: usage.order.discount,
+              }
+            : null,
+        })),
+        pagination: {
+          page,
+          limit,
+          total: salesTotal,
+          pages: Math.max(1, Math.ceil(salesTotal / limit)),
+        },
+      });
     } catch (err) {
       console.error('[COUPONS] Get error:', err);
       return res.status(500).json({ error: 'Erro interno do servidor' });
@@ -143,6 +244,14 @@ class CouponController {
         }
       });
 
+      await recordAdminAction({
+        ...requestContext(req),
+        action: AUDIT_ACTIONS.COUPON_CREATE,
+        targetType: 'coupon',
+        targetId: coupon.id,
+        metadata: { code: coupon.code, type: coupon.type, value: Number(coupon.value) },
+      });
+
       return res.status(201).json(coupon);
     } catch (err) {
       console.error('[COUPONS] Create error:', err);
@@ -160,6 +269,9 @@ class CouponController {
       } = req.body;
 
       if (!id) return res.status(400).json({ error: 'ID ausente' });
+
+      const before = await prisma.coupon.findUnique({ where: { id } });
+      if (!before) return res.status(404).json({ error: 'Cupom não encontrado' });
 
       // Se mudar o código, verifica se já existe outro
       if (code) {
@@ -206,6 +318,20 @@ class CouponController {
         });
       });
 
+      await recordAdminAction({
+        ...requestContext(req),
+        action: AUDIT_ACTIONS.COUPON_UPDATE,
+        targetType: 'coupon',
+        targetId: id,
+        metadata: {
+          code: result.code,
+          oldCode: before.code,
+          isActive: result.isActive,
+          value: Number(result.value),
+          oldValue: Number(before.value),
+        },
+      });
+
       return res.json(result);
     } catch (err) {
       console.error('[COUPONS] Update error:', err);
@@ -218,7 +344,19 @@ class CouponController {
       const { id } = req.params;
       if (!id) return res.status(400).json({ error: 'ID ausente' });
 
+      const existing = await prisma.coupon.findUnique({ where: { id } });
+      if (!existing) return res.status(404).json({ error: 'Cupom não encontrado' });
+
       await prisma.coupon.delete({ where: { id } });
+
+      await recordAdminAction({
+        ...requestContext(req),
+        action: AUDIT_ACTIONS.COUPON_DELETE,
+        targetType: 'coupon',
+        targetId: id,
+        metadata: { code: existing.code },
+      });
+
       return res.json({ message: 'Cupom excluído com sucesso' });
     } catch (err) {
       console.error('[COUPONS] Delete error:', err);

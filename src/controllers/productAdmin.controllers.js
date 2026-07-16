@@ -6,6 +6,7 @@ const {
   AUDIT_ACTIONS,
   requestContext,
   buildPriceChangeMetadata,
+  collectFieldChanges,
 } = require('../services/auditLog.service');
 
 const DELIVERY_TYPES = ['automatic_lines', 'file', 'manual_chat', 'mixed', 'manual', 'automatic_text'];
@@ -236,6 +237,19 @@ class ProductAdminController {
 
         return product;
       });
+
+      await recordAdminAction({
+        ...requestContext(req),
+        action: AUDIT_ACTIONS.PRODUCT_CREATE,
+        targetType: 'product',
+        targetId: created.id,
+        metadata: {
+          productName: created.name,
+          price: Number(created.price),
+          categoryId: created.categoryId || null,
+        },
+      });
+
       return res.status(201).json(created);
     } catch (err) {
       console.error('[ProductAdmin.create]', err);
@@ -362,22 +376,62 @@ class ProductAdminController {
         return product;
       });
 
+      const ctx = requestContext(req);
+      const displayName = updated.name || existing.name;
+
+      if (data.name !== undefined && existing.name !== updated.name) {
+        await recordAdminAction({
+          ...ctx,
+          action: AUDIT_ACTIONS.PRODUCT_NAME_CHANGE,
+          targetType: 'product',
+          targetId: id,
+          metadata: {
+            productName: updated.name,
+            oldName: existing.name,
+            newName: updated.name,
+          },
+        });
+      }
+
       const priceMetadata = buildPriceChangeMetadata(
         existing,
         {
           price: updated.price,
           comparePrice: updated.comparePrice,
         },
-        { productName: existing.name }
+        { productName: displayName }
       );
 
       if (priceMetadata) {
         await recordAdminAction({
-          ...requestContext(req),
+          ...ctx,
           action: AUDIT_ACTIONS.PRODUCT_PRICE_CHANGE,
           targetType: 'product',
           targetId: id,
           metadata: priceMetadata,
+        });
+      }
+
+      const otherChanges = collectFieldChanges(existing, updated, [
+        'isActive',
+        'isVisible',
+        'featured',
+        'categoryId',
+        'deliveryType',
+        'platform',
+        'stockQuantity',
+      ]).filter((c) => c.field !== 'name');
+
+      if (otherChanges.length) {
+        await recordAdminAction({
+          ...ctx,
+          action: AUDIT_ACTIONS.PRODUCT_UPDATE,
+          targetType: 'product',
+          targetId: id,
+          metadata: {
+            productName: displayName,
+            changes: otherChanges,
+          },
         });
       }
 
@@ -402,6 +456,18 @@ class ProductAdminController {
         });
       }
       await prisma.product.delete({ where: { id } });
+
+      await recordAdminAction({
+        ...requestContext(req),
+        action: AUDIT_ACTIONS.PRODUCT_DELETE,
+        targetType: 'product',
+        targetId: id,
+        metadata: {
+          productName: existing.name,
+          price: Number(existing.price),
+        },
+      });
+
       return res.json({ success: true });
     } catch (err) {
       console.error('[ProductAdmin.remove]', err);

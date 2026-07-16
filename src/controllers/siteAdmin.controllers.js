@@ -2,6 +2,11 @@ const { prisma } = require('../config/prisma');
 const { sanitizeString } = require('../utils/sanitize');
 const { normalizeCheckoutSettings } = require('../utils/checkoutConfig');
 const { ensureDefaultPageSeo, ensureDefaultReviews } = require('./homeReview.controllers');
+const {
+  recordAdminAction,
+  AUDIT_ACTIONS,
+  requestContext,
+} = require('../services/auditLog.service');
 
 const DEFAULT_INSTITUTIONAL_PAGES = [
   {
@@ -282,11 +287,72 @@ class SiteAdminController {
         data.reviewsSettings = normalizeReviewsSettings(body.reviewsSettings);
       }
 
+      const previous = await prisma.siteConfig.findUnique({ where: { id: 'default' } });
+
       const config = await prisma.siteConfig.upsert({
         where: { id: 'default' },
         update: data,
         create: { id: 'default', ...data },
       });
+
+      const ctx = requestContext(req);
+      const changedKeys = Object.keys(data);
+
+      if (body.pluginsConfig !== undefined) {
+        const before = previous?.pluginsConfig && typeof previous.pluginsConfig === 'object'
+          ? previous.pluginsConfig
+          : {};
+        const after = config.pluginsConfig && typeof config.pluginsConfig === 'object'
+          ? config.pluginsConfig
+          : {};
+        const pluginIds = Array.from(new Set([...Object.keys(before), ...Object.keys(after)]));
+        const pluginChanges = [];
+
+        for (const pluginId of pluginIds) {
+          const prevEntry = before[pluginId] || {};
+          const nextEntry = after[pluginId] || {};
+          const prevEnabled = Boolean(prevEntry.enabled ?? prevEntry.isEnabled);
+          const nextEnabled = Boolean(nextEntry.enabled ?? nextEntry.isEnabled);
+          const configChanged = JSON.stringify(prevEntry) !== JSON.stringify(nextEntry);
+          if (prevEnabled === nextEnabled && !configChanged) continue;
+          pluginChanges.push({
+            pluginId,
+            oldEnabled: prevEnabled,
+            newEnabled: nextEnabled,
+            configChanged,
+          });
+        }
+
+        if (pluginChanges.length) {
+          await recordAdminAction({
+            ...ctx,
+            action: AUDIT_ACTIONS.PLUGIN_UPDATE,
+            targetType: 'plugin',
+            targetId: pluginChanges.map((p) => p.pluginId).join(','),
+            metadata: { plugins: pluginChanges },
+          });
+        }
+      }
+
+      const settingsKeys = changedKeys.filter((k) => k !== 'pluginsConfig');
+      if (settingsKeys.length) {
+        await recordAdminAction({
+          ...ctx,
+          action: AUDIT_ACTIONS.SETTINGS_UPDATE,
+          targetType: 'siteConfig',
+          targetId: 'default',
+          metadata: {
+            changedKeys: settingsKeys.slice(0, 40),
+            section: settingsKeys.some((k) => k.startsWith('footer'))
+              ? 'footer'
+              : settingsKeys.some((k) => k.startsWith('topBar') || k.startsWith('popup') || k.startsWith('home'))
+                ? 'pages'
+                : settingsKeys.includes('checkoutSettings')
+                  ? 'checkout'
+                  : 'geral',
+          },
+        });
+      }
 
       return res.json(config);
     } catch (err) {

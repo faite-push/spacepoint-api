@@ -1305,12 +1305,10 @@ class ChatController {
           skip,
           take: limit,
         }),
-        productId
-          ? prisma.chat.findMany({
-            where,
-            select: { rating: true },
-          })
-          : Promise.resolve([]),
+        prisma.chat.findMany({
+          where,
+          select: { rating: true },
+        }),
       ]);
 
       const mapReview = (review) => {
@@ -1348,25 +1346,22 @@ class ChatController {
 
       const payload = reviews.map(mapReview);
 
-      let summary = null;
-      if (productId) {
-        const distribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
-        let sum = 0;
-        for (const row of allRatings) {
-          const rating = Math.min(5, Math.max(1, Number(row.rating) || 0));
-          sum += rating;
-          distribution[rating] += 1;
-        }
-        summary = {
-          averageRating: total ? Math.round((sum / total) * 10) / 10 : 0,
-          total,
-          distribution,
-        };
+      const distribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+      let sum = 0;
+      for (const row of allRatings) {
+        const rating = Math.min(5, Math.max(1, Number(row.rating) || 0));
+        sum += rating;
+        distribution[rating] += 1;
       }
+      const summary = {
+        averageRating: total ? Math.round((sum / total) * 100) / 100 : 0,
+        total,
+        distribution,
+      };
 
       const response = {
         reviews: payload,
-        ...(summary ? { summary } : {}),
+        summary,
         ...(productId
           ? {
             pagination: {

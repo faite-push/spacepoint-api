@@ -1,7 +1,11 @@
 const { prisma } = require('../config/prisma');
 const { ALL_PERMISSIONS } = require('../config/permissions');
-
 const { isSuperOwner } = require('../utils/auth');
+const {
+  recordAdminAction,
+  AUDIT_ACTIONS,
+  requestContext,
+} = require('../services/auditLog.service');
 
 const hasSuperOwnerPermission = async (userId) => {
   const user = await prisma.user.findUnique({
@@ -127,6 +131,17 @@ class RoleController {
         },
       });
 
+      await recordAdminAction({
+        ...requestContext(req),
+        action: AUDIT_ACTIONS.ROLE_CREATE,
+        targetType: 'role',
+        targetId: role.id,
+        metadata: {
+          roleName: role.name,
+          permissions: role.permissions.map((p) => p.key),
+        },
+      });
+
       return res.status(201).json({
         success: true,
         role: {
@@ -151,6 +166,7 @@ class RoleController {
       // Check if role exists and is not protected
       const existingRole = await prisma.role.findUnique({
         where: { id },
+        include: { permissions: { select: { key: true } } },
       });
 
       if (!existingRole) {
@@ -183,6 +199,20 @@ class RoleController {
           _count: {
             select: { users: true },
           },
+        },
+      });
+
+      await recordAdminAction({
+        ...requestContext(req),
+        action: AUDIT_ACTIONS.ROLE_UPDATE,
+        targetType: 'role',
+        targetId: id,
+        metadata: {
+          roleName: role.name,
+          oldName: existingRole.name,
+          newName: role.name,
+          oldPermissions: existingRole.permissions.map((p) => p.key),
+          newPermissions: role.permissions.map((p) => p.key),
         },
       });
 
@@ -234,6 +264,14 @@ class RoleController {
 
       await prisma.role.delete({
         where: { id },
+      });
+
+      await recordAdminAction({
+        ...requestContext(req),
+        action: AUDIT_ACTIONS.ROLE_DELETE,
+        targetType: 'role',
+        targetId: id,
+        metadata: { roleName: existingRole.name },
       });
 
       return res.json({ success: true });
@@ -303,6 +341,21 @@ class RoleController {
               permissions: true,
             },
           },
+        },
+      });
+
+      await recordAdminAction({
+        ...requestContext(req),
+        action: AUDIT_ACTIONS.TEAM_ROLE_ASSIGN,
+        targetType: 'user',
+        targetId: userId,
+        metadata: {
+          userName: user.name || user.email,
+          userEmail: user.email,
+          oldRoleId: user.roleId || null,
+          oldRoleName: user.role?.name || null,
+          newRoleId: updatedUser.roleId || null,
+          newRoleName: updatedUser.role?.name || null,
         },
       });
 
