@@ -51,6 +51,8 @@ async function loadSiteBranding() {
     headerHtml: templates.headerHtml,
     footerHtml: templates.footerHtml,
     customBodies: templates.bodies,
+    customSubjects: templates.subjects,
+    customPreheaders: templates.preheaders,
   };
 }
 
@@ -90,6 +92,8 @@ async function loadOrderContext(orderId) {
     logoWhiteUrl: branding.logoWhiteUrl,
     contactEmail: branding.contactEmail,
     customBodies: branding.customBodies,
+    customSubjects: branding.customSubjects,
+    customPreheaders: branding.customPreheaders,
     customerName: customer.customerName,
     customerEmail: customer.customerEmail,
     items,
@@ -107,6 +111,8 @@ async function loadOrderContext(orderId) {
     headerHtml: branding.headerHtml,
     footerHtml: branding.footerHtml,
     bodies: branding.customBodies,
+    subjects: branding.customSubjects,
+    preheaders: branding.customPreheaders,
   });
 }
 
@@ -123,6 +129,8 @@ function layoutFields(ctx) {
     storeUrl: ctx.storeUrl,
     contactEmail: ctx.contactEmail,
     customBodies: ctx.customBodies,
+    customSubjects: ctx.customSubjects,
+    customPreheaders: ctx.customPreheaders,
   };
 }
 

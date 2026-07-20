@@ -2,11 +2,14 @@ const { prisma } = require('../config/prisma');
 const emailService = require('../services/email.service');
 const {
   normalizeEmailTemplates,
+  applyEmailTemplate,
   EMAIL_BLOCK_CATALOG,
   SAMPLE_BODY_HTML,
   DEFAULT_HEADER_HTML,
   DEFAULT_FOOTER_HTML,
   DEFAULT_BODIES,
+  DEFAULT_SUBJECTS,
+  DEFAULT_PREHEADERS,
   buildEmailDocument,
   getEmailTemplates,
 } = require('../utils/emailTemplatesSettings');
@@ -17,17 +20,22 @@ function defaultsPayload() {
     footerHtml: DEFAULT_FOOTER_HTML,
     sampleBodyHtml: SAMPLE_BODY_HTML,
     bodies: DEFAULT_BODIES,
+    subjects: DEFAULT_SUBJECTS,
+    preheaders: DEFAULT_PREHEADERS,
   };
 }
 
 function buildPreviewVars(branding, body = {}) {
   const sampleItems = `<table style="width:100%;border-collapse:collapse;"><tr>
-    <td style="vertical-align:middle;text-align:left;padding:6px 0;">
-      <h3 style="margin:0;font-size:17px;color:#ffffff;font-weight:600;">Produto de exemplo</h3>
-      <p style="margin:4px 0 0;font-size:18px;color:#A855F7;font-weight:700;">R$&nbsp;69,99</p>
-      <p style="margin:2px 0 0;color:#a1a1aa;font-size:13px;">1x</p>
-    </td>
-  </tr></table>`;
+        <td style="vertical-align:middle;text-align:left;padding:6px 0;">
+          <h3 style="margin:0;font-size:17px;color:#18181b;font-weight:600;">Produto de exemplo</h3>
+          <p style="margin:4px 0 0;font-size:18px;color:#A855F7;font-weight:700;">R$&nbsp;69,99</p>
+          <p style="margin:2px 0 0;color:#71717a;font-size:13px;">1x</p>
+        </td>
+      </tr></table>`;
+
+  const templateKey = body.templateKey || body.blockId || '';
+  const defaultPreheader = templateKey ? DEFAULT_PREHEADERS[templateKey] : '';
 
   return {
     storeName: branding.storeName,
@@ -48,9 +56,28 @@ function buildPreviewVars(branding, body = {}) {
     ctaUrl: branding.ctaUrl || branding.storeUrl,
     ctaLabel: body.ctaLabel || branding.ctaLabel || 'Abrir loja',
     unsubscribeUrl: branding.unsubscribeUrl || '#',
+    preheader:
+      body.preheader ||
+      defaultPreheader ||
+      'Pré-visualização do seu e-mail transacional.',
     title: body.title || 'Pré-visualização',
     subtitle: body.subtitle || 'Como o e-mail aparece para o cliente',
   };
+}
+
+function resolveTestSubject(branding, templates, body, vars) {
+  const templateKey = body.templateKey || body.blockId || '';
+  const fromBody =
+    typeof body.subject === 'string' && body.subject.trim() ? body.subject.trim() : '';
+  const fromTemplates =
+    templateKey && typeof templates.subjects?.[templateKey] === 'string'
+      ? templates.subjects[templateKey]
+      : '';
+  const fromDefaults = templateKey ? DEFAULT_SUBJECTS[templateKey] : '';
+  const template =
+    fromBody || fromTemplates || fromDefaults || `${branding.storeName} — ${vars.title || 'teste'}`;
+  const rendered = applyEmailTemplate(template, vars);
+  return `[TESTE] ${rendered}`;
 }
 
 function isValidEmail(email) {
@@ -89,6 +116,7 @@ class EmailTemplatesController {
         ...(body.footerHtml !== undefined ? { footerHtml: String(body.footerHtml) } : {}),
         ...(body.bodies !== undefined ? { bodies: body.bodies } : {}),
         ...(body.subjects !== undefined ? { subjects: body.subjects } : {}),
+        ...(body.preheaders !== undefined ? { preheaders: body.preheaders } : {}),
       });
 
       if (merged.headerHtml.length > 100000 || merged.footerHtml.length > 100000) {
@@ -167,8 +195,7 @@ class EmailTemplatesController {
 
       const vars = buildPreviewVars(branding, body);
       const html = buildEmailDocument({ headerHtml, footerHtml, bodyHtml, vars });
-      const blockLabel = body.blockId || body.title || 'template';
-      const subject = `[TESTE] ${branding.storeName} — ${vars.title || blockLabel}`;
+      const subject = resolveTestSubject(branding, templates, body, vars);
 
       const sent = await emailService.sendEmail(to, subject, html);
       if (!sent) {

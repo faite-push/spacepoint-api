@@ -231,7 +231,9 @@ async function syncCart({
       couponCode: couponCode || null,
       lastActivityAt: new Date(),
       convertedAt: null,
-      ...(existing?.convertedAt ? { recoveryEmailSentAt: null } : {}),
+      ...(existing?.convertedAt
+        ? { recoveryEmailSentAt: null, recoveryEmailsSent: {} }
+        : {}),
       ...(resolvedEmail ? { email: resolvedEmail } : {}),
       ...(resolvedName ? { customerName: resolvedName } : {}),
     };
@@ -248,6 +250,18 @@ async function syncCart({
     await persistCartItems(tx, created.id, normalizedItems);
     return created;
   });
+
+  // Exclusão mútua: produto no carrinho → arquiva interesse de abandono de produto
+  try {
+    const { archiveInterestsForCartItems } = require('./productInterest.service');
+    await archiveInterestsForCartItems({
+      visitorId,
+      userId,
+      productIds: normalizedItems.map((i) => i.productId),
+    });
+  } catch (err) {
+    console.error('[cart.syncCart] archiveInterestsForCartItems', err.message);
+  }
 
   return { synced: true, cartId: cart.id, subtotalCents: cart.subtotalCents };
 }
@@ -309,54 +323,101 @@ async function markConverted({ userId, visitorId }) {
   return { converted: result.count };
 }
 
-async function listRecoverableCartIds({ delayHours, inactivityMinutes, minSubtotalCents, limit = 50 }) {
-  const emailCutoff = new Date(Date.now() - delayHours * 60 * 60 * 1000);
+async function listRecoverableCartJobs({
+  delays,
+  inactivityMinutes,
+  minSubtotalCents,
+  limit = 50,
+}) {
+  const { parseSentMap, nextDueDelay } = require('../utils/recoverySequence');
+  const delayList = Array.isArray(delays) && delays.length ? delays : [1];
+  const maxDelay = Math.max(...delayList);
+  // Candidatos: inativos pelo menos o menor delay (e inatividade)
+  const minDelay = Math.min(...delayList);
+  const emailCutoff = new Date(Date.now() - minDelay * 60 * 60 * 1000);
   const inactivityCutoff =
     inactivityMinutes && inactivityMinutes > 0
       ? new Date(Date.now() - inactivityMinutes * 60 * 1000)
       : emailCutoff;
-  // E-mail só depois do delay; e nunca antes de estar "abandonado" na listagem
   const cutoff = emailCutoff < inactivityCutoff ? emailCutoff : inactivityCutoff;
+  // Também inclui quem já recebeu e-mail mas pode ter próximo step (anchor até maxDelay)
+  const maxCutoff = new Date(Date.now() - maxDelay * 60 * 60 * 1000);
 
   const carts = await prisma.abandonedCart.findMany({
     where: {
       convertedAt: null,
       archivedAt: null,
-      recoveryEmailSentAt: null,
       email: { not: null },
       subtotalCents: { gte: minSubtotalCents },
       lastActivityAt: { lte: cutoff },
       items: { some: {} },
+      OR: [
+        { recoveryEmailSentAt: null },
+        { lastActivityAt: { lte: new Date(Date.now() - minDelay * 60 * 60 * 1000) } },
+      ],
     },
     select: {
       id: true,
       userId: true,
       email: true,
+      lastActivityAt: true,
+      recoveryEmailSentAt: true,
+      recoveryEmailsSent: true,
     },
     orderBy: { lastActivityAt: 'asc' },
-    take: limit,
+    take: limit * 3,
   });
 
   if (!carts.length) return [];
 
-  const filtered = [];
+  const jobs = [];
   for (const cart of carts) {
     if (cart.userId) {
       const recentOrder = await prisma.order.findFirst({
         where: {
           userId: cart.userId,
           status: { in: ['PENDING', 'PAID', 'DELIVERED'] },
-          createdAt: { gte: cutoff },
+          createdAt: { gte: maxCutoff },
         },
         select: { id: true },
       });
       if (recentOrder) continue;
     }
 
-    filtered.push(cart.id);
+    const sentMap = parseSentMap(
+      cart.recoveryEmailsSent,
+      cart.recoveryEmailSentAt,
+      minDelay
+    );
+    const due = nextDueDelay({
+      delays: delayList,
+      sentMap,
+      anchorDate: cart.lastActivityAt,
+      inactivityMinutes,
+    });
+    if (!due) continue;
+
+    jobs.push({
+      cartId: cart.id,
+      delayHours: due.delayHours,
+      stepIndex: due.stepIndex,
+      stepTotal: due.stepTotal,
+    });
+    if (jobs.length >= limit) break;
   }
 
-  return filtered;
+  return jobs;
+}
+
+/** @deprecated use listRecoverableCartJobs */
+async function listRecoverableCartIds(opts) {
+  const jobs = await listRecoverableCartJobs({
+    delays: [opts.delayHours || 1],
+    inactivityMinutes: opts.inactivityMinutes,
+    minSubtotalCents: opts.minSubtotalCents,
+    limit: opts.limit,
+  });
+  return jobs.map((j) => j.cartId);
 }
 
 module.exports = {
@@ -364,5 +425,6 @@ module.exports = {
   captureEmail,
   markConverted,
   listRecoverableCartIds,
+  listRecoverableCartJobs,
   normalizeCartItems,
 };

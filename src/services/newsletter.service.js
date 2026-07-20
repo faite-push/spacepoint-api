@@ -1,5 +1,11 @@
 const { prisma } = require('../config/prisma');
 const emailService = require('./email.service');
+const {
+  buildEmailDocument,
+  DEFAULT_HEADER_HTML,
+  DEFAULT_FOOTER_HTML,
+  FRONTEND_URL,
+} = require('../utils/emailTemplatesSettings');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ALLOWED_SOURCES = new Set(['home', 'footer']);
@@ -24,14 +30,28 @@ function normalizeSource(source) {
 }
 
 function buildWelcomeEmailHtml(email) {
-  return `
-    <div style="font-family:Arial,sans-serif;line-height:1.6;color:#111">
-      <h2 style="margin:0 0 12px">Bem-vindo à newsletter Space Point</h2>
-      <p>Olá! Confirmamos a inscrição do e-mail <strong>${email}</strong>.</p>
-      <p>Você receberá novidades, ofertas e lançamentos diretamente na sua caixa de entrada.</p>
-      <p style="color:#666;font-size:13px">Se não foi você, ignore este e-mail.</p>
-    </div>
-  `;
+  const storeUrl = FRONTEND_URL;
+  const bodyHtml = `<div style="text-align:center;margin-bottom:24px;">
+  <h1 style="margin:12px 0 0;font-size:24px;color:#18181b;">Inscrição confirmada</h1>
+  <p style="margin:8px 0 0;color:#7c3aed;font-size:15px;">Bem-vindo à newsletter</p>
+  <hr style="border:none;border-top:1px solid #e4e4e7;margin:24px 0;" />
+</div>
+<p style="margin:-14px 0 16px;font-size:16px;color:#27272a;">Olá!</p>
+<p style="max-width:520px;color:#52525b;">Confirmamos a inscrição do e-mail <strong>${email}</strong>.</p>
+<p style="max-width:520px;color:#52525b;">Você receberá novidades, ofertas e lançamentos diretamente na sua caixa de entrada.</p>
+<p style="margin-top:16px;text-align:center;color:#a1a1aa;font-size:12px;">Se não foi você, ignore este e-mail.</p>`;
+
+  return buildEmailDocument({
+    headerHtml: DEFAULT_HEADER_HTML,
+    footerHtml: DEFAULT_FOOTER_HTML,
+    bodyHtml,
+    vars: {
+      storeName: 'Space Point',
+      logoUrl: `${storeUrl}/logo.png`,
+      storeUrl,
+      unsubscribeUrl: '',
+    },
+  });
 }
 
 async function sendWelcomeEmail(email) {

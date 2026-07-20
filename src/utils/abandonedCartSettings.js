@@ -74,10 +74,13 @@ function normalizeAbandonedCartSettings(raw) {
 
   const delayHours = Math.min(...cartEmailDelays);
 
-  const cartSendMode =
-    raw.cartSendMode === 'manual' || raw.sendRecoveryEmail === false
-      ? 'manual'
-      : 'automated';
+  // Preferir cartSendMode explícito; sendRecoveryEmail só como legado quando mode não veio.
+  let cartSendMode = 'automated';
+  if (raw.cartSendMode === 'manual' || raw.cartSendMode === 'automated') {
+    cartSendMode = raw.cartSendMode;
+  } else if (raw.sendRecoveryEmail === false) {
+    cartSendMode = 'manual';
+  }
 
   return {
     enabled: raw.enabled !== false,

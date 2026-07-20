@@ -143,6 +143,30 @@ class MarketingAutomationsController {
     }
   }
 
+  async reorderCancelledOrder(req, res) {
+    try {
+      const token = String(req.params.token || req.query.token || '').trim();
+      const order = await marketing.getCancelledOrderByReorderToken(token);
+      if (!order) {
+        return res.status(404).json({ error: 'Pedido cancelado não encontrado para recompra' });
+      }
+
+      const payload = marketing.buildReorderPayload(order);
+      if (!payload?.items?.length) {
+        return res.status(409).json({
+          error: 'Nenhum item deste pedido está disponível no momento',
+          skipped: payload?.skipped || 0,
+        });
+      }
+
+      await marketing.markCancelledOrderReorderOpened(token);
+      return res.json(payload);
+    } catch (err) {
+      console.error('[Marketing.reorderCancelledOrder]', err);
+      return res.status(500).json({ error: 'Erro ao remontar pedido cancelado' });
+    }
+  }
+
   async getSettings(req, res) {
     try {
       const data = await marketing.getAutomationSettings();

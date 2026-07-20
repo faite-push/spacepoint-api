@@ -12,6 +12,7 @@ const {
   CANCELLED_ORDER_DELAY_OPTIONS,
   DEFAULT_ABANDONED_CART_SETTINGS,
 } = require('../utils/abandonedCartSettings');
+const { countSentEmails } = require('../utils/recoverySequence');
 
 const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
 
@@ -72,6 +73,55 @@ async function ensureCartToken(cartId) {
     data: { recoveryToken: token },
   });
   return token;
+}
+
+async function ensureProductInterestToken(interestId) {
+  const interest = await prisma.abandonedProductInterest.findUnique({
+    where: { id: interestId },
+    select: { id: true, recoveryToken: true },
+  });
+  if (!interest) return null;
+  if (interest.recoveryToken) return interest.recoveryToken;
+  const token = ensureToken();
+  await prisma.abandonedProductInterest.update({
+    where: { id: interest.id },
+    data: { recoveryToken: token },
+  });
+  return token;
+}
+
+async function ensureCancelledOrderToken(orderId) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { id: true, cancelledRecoveryToken: true },
+  });
+  if (!order) return null;
+  if (order.cancelledRecoveryToken) return order.cancelledRecoveryToken;
+  const token = ensureToken();
+  await prisma.order.update({
+    where: { id: order.id },
+    data: { cancelledRecoveryToken: token },
+  });
+  return token;
+}
+
+function formatProductRecoveryUrl(slug, source) {
+  const base = `${FRONTEND_URL}/product/${encodeURIComponent(slug)}`;
+  if (!source) return base;
+  return `${base}?src=${encodeURIComponent(source)}`;
+}
+
+/** Link de 1 clique: abre o checkout com os itens do pedido cancelado. */
+function formatCancelledOrderRecoveryUrl(token, source) {
+  const base = `${FRONTEND_URL}/checkout?reorder=${encodeURIComponent(token)}`;
+  if (!source) return base;
+  return `${base}&src=${encodeURIComponent(source)}`;
+}
+
+/** Fallback para links genéricos da loja. */
+function formatStoreRecoveryUrl(source) {
+  if (!source) return FRONTEND_URL;
+  return `${FRONTEND_URL}/?src=${encodeURIComponent(source)}`;
 }
 
 async function getWhatsAppTemplates() {
@@ -161,9 +211,10 @@ function mapCartRow(cart, templates) {
 }
 
 async function computeCartsMetrics(rangeFilter) {
-  const [sentCarts, opened, clicked, attributedPaidOrders] = await Promise.all([
-    prisma.abandonedCart.count({
+  const [sentCartRows, opened, clicked, attributedPaidOrders] = await Promise.all([
+    prisma.abandonedCart.findMany({
       where: { recoveryEmailSentAt: rangeFilter, archivedAt: null },
+      select: { recoveryEmailsSent: true, recoveryEmailSentAt: true },
     }),
     prisma.abandonedCart.count({
       where: {
@@ -223,7 +274,10 @@ async function computeCartsMetrics(rangeFilter) {
 
   const recoveredCount = attributedPaidOrders.length;
   const recoveredRevenueCents = attributedPaidOrders.reduce((s, o) => s + o.total, 0);
-  const emailsSent = sentCarts;
+  const emailsSent = sentCartRows.reduce(
+    (sum, row) => sum + countSentEmails(row.recoveryEmailsSent, row.recoveryEmailSentAt),
+    0
+  );
   const openRate = emailsSent ? (opened / emailsSent) * 100 : 0;
   const clickRate = emailsSent ? (clicked / emailsSent) * 100 : 0;
   // Conversão real: cliques no e-mail que viraram compra paga atribuída
@@ -245,31 +299,66 @@ async function computeCartsMetrics(rangeFilter) {
 }
 
 async function computeAbandonedProductsMetrics(rangeFilter) {
-  const settings = await getAbandonedCartSettings(prisma);
-  const inactivityCutoff = getInactivityCutoff(settings);
-  const activityTo = inactivityCutoff < rangeFilter.lte ? inactivityCutoff : rangeFilter.lte;
-
-  const carts = await prisma.abandonedCart.findMany({
+  const interests = await prisma.abandonedProductInterest.findMany({
     where: {
       archivedAt: null,
-      lastActivityAt: { gte: rangeFilter.gte, lte: activityTo },
-      convertedAt: null,
-      items: { some: {} },
+      lastViewedAt: rangeFilter,
     },
-    include: { items: true },
+    include: {
+      product: { select: { price: true } },
+      variant: { select: { price: true } },
+    },
   });
-  const productsAbandoned = carts.reduce((s, c) => s + c.items.reduce((a, i) => a + i.quantity, 0), 0);
-  const lostCents = carts.reduce((s, c) => s + c.subtotalCents, 0);
+
+  const unfinished = interests.filter((i) => !i.convertedAt).length;
+  const lostRevenueCents = interests
+    .filter((i) => !i.convertedAt)
+    .reduce((sum, i) => {
+      const price = i.variant?.price ?? i.product?.price;
+      const cents = Math.round(Number(price || 0) * 100);
+      return sum + (Number.isFinite(cents) ? cents : 0);
+    }, 0);
+
+  const emailsSent = interests.reduce(
+    (sum, i) => sum + countSentEmails(i.recoveryEmailsSent, i.recoveryEmailSentAt),
+    0
+  );
+  const opened = interests.filter((i) => i.emailOpenedAt).length;
+  const clicked = interests.filter((i) => i.emailClickedAt).length;
+  const converted = interests.filter((i) => i.convertedAt && i.recoveryEmailSentAt).length;
+
+  const recovered = await prisma.abandonedProductInterest.findMany({
+    where: {
+      convertedAt: rangeFilter,
+      recoveryEmailSentAt: { not: null },
+    },
+    include: {
+      product: { select: { price: true } },
+      variant: { select: { price: true } },
+    },
+  });
+  const recoveredRevenueCents = recovered.reduce((sum, i) => {
+    const price = i.variant?.price ?? i.product?.price;
+    const cents = Math.round(Number(price || 0) * 100);
+    return sum + (Number.isFinite(cents) ? cents : 0);
+  }, 0);
+
+  const openRate = emailsSent ? (opened / emailsSent) * 100 : 0;
+  const clickRate = emailsSent ? (clicked / emailsSent) * 100 : 0;
+  const conversionRate = emailsSent ? (converted / emailsSent) * 100 : 0;
+  const averageTicketCents =
+    recovered.length > 0 ? Math.round(recoveredRevenueCents / recovered.length) : 0;
+
   return {
-    recoveredOrders: 0,
-    recoveredRevenueCents: 0,
-    unfinishedOrders: productsAbandoned,
-    lostRevenueCents: lostCents,
-    emailsSent: 0,
-    openRate: 0,
-    clickRate: 0,
-    conversionRate: 0,
-    averageTicketCents: 0,
+    recoveredOrders: recovered.length,
+    recoveredRevenueCents,
+    unfinishedOrders: unfinished,
+    lostRevenueCents,
+    emailsSent,
+    openRate: Math.round(openRate * 10) / 10,
+    clickRate: Math.round(clickRate * 10) / 10,
+    conversionRate: Math.round(conversionRate * 10) / 10,
+    averageTicketCents,
   };
 }
 
@@ -278,19 +367,54 @@ async function computeCancelledOrdersMetrics(rangeFilter) {
     where: {
       status: 'CANCELLED',
       updatedAt: rangeFilter,
+      NOT: { adminNotes: { contains: AUTOMATION_HIDDEN_NOTE } },
+    },
+    select: {
+      id: true,
+      total: true,
+      cancelledRecoveryEmailSentAt: true,
+      cancelledRecoveryEmailsSent: true,
+      cancelledRecoveryEmailOpenedAt: true,
+      cancelledRecoveryEmailClickedAt: true,
+      cancelledRecoveryConvertedAt: true,
+    },
+  });
+
+  const unfinished = cancelled.filter((o) => !o.cancelledRecoveryConvertedAt);
+  const emailsSent = cancelled.reduce(
+    (sum, o) =>
+      sum + countSentEmails(o.cancelledRecoveryEmailsSent, o.cancelledRecoveryEmailSentAt),
+    0
+  );
+  const opened = cancelled.filter((o) => o.cancelledRecoveryEmailOpenedAt).length;
+  const clicked = cancelled.filter((o) => o.cancelledRecoveryEmailClickedAt).length;
+
+  const recovered = await prisma.order.findMany({
+    where: {
+      cancelledRecoveryConvertedAt: rangeFilter,
+      cancelledRecoveryEmailSentAt: { not: null },
     },
     select: { id: true, total: true },
   });
+  const recoveredRevenueCents = recovered.reduce((s, o) => s + (o.total || 0), 0);
+  const converted = recovered.length;
+
+  const openRate = emailsSent ? (opened / emailsSent) * 100 : 0;
+  const clickRate = emailsSent ? (clicked / emailsSent) * 100 : 0;
+  const conversionRate = emailsSent ? (converted / emailsSent) * 100 : 0;
+  const averageTicketCents =
+    recovered.length > 0 ? Math.round(recoveredRevenueCents / recovered.length) : 0;
+
   return {
-    recoveredOrders: 0,
-    recoveredRevenueCents: 0,
-    unfinishedOrders: cancelled.length,
-    lostRevenueCents: cancelled.reduce((s, o) => s + (o.total || 0), 0),
-    emailsSent: 0,
-    openRate: 0,
-    clickRate: 0,
-    conversionRate: 0,
-    averageTicketCents: 0,
+    recoveredOrders: recovered.length,
+    recoveredRevenueCents,
+    unfinishedOrders: unfinished.length,
+    lostRevenueCents: unfinished.reduce((s, o) => s + (o.total || 0), 0),
+    emailsSent,
+    openRate: Math.round(openRate * 10) / 10,
+    clickRate: Math.round(clickRate * 10) / 10,
+    conversionRate: Math.round(conversionRate * 10) / 10,
+    averageTicketCents,
   };
 }
 
@@ -830,29 +954,203 @@ async function getCartByRecoveryToken(token) {
 
 async function trackEmailOpen(token) {
   if (!token) return;
-  await prisma.abandonedCart.updateMany({
+  const tok = String(token);
+  const cartResult = await prisma.abandonedCart.updateMany({
     where: {
-      recoveryToken: String(token),
+      recoveryToken: tok,
       emailOpenedAt: null,
     },
     data: { emailOpenedAt: new Date() },
+  });
+  if (cartResult.count > 0) return;
+
+  const productResult = await prisma.abandonedProductInterest.updateMany({
+    where: {
+      recoveryToken: tok,
+      emailOpenedAt: null,
+    },
+    data: { emailOpenedAt: new Date() },
+  });
+  if (productResult.count > 0) return;
+
+  await prisma.order.updateMany({
+    where: {
+      cancelledRecoveryToken: tok,
+      cancelledRecoveryEmailOpenedAt: null,
+    },
+    data: { cancelledRecoveryEmailOpenedAt: new Date() },
   });
 }
 
 async function trackEmailClick(token) {
   if (!token) return null;
+  const tok = String(token);
+
   const cart = await prisma.abandonedCart.findFirst({
-    where: { recoveryToken: String(token) },
+    where: { recoveryToken: tok },
   });
-  if (!cart) return null;
-  await prisma.abandonedCart.update({
-    where: { id: cart.id },
-    data: {
-      emailClickedAt: cart.emailClickedAt || new Date(),
-      emailOpenedAt: cart.emailOpenedAt || new Date(),
+  if (cart) {
+    await prisma.abandonedCart.update({
+      where: { id: cart.id },
+      data: {
+        emailClickedAt: cart.emailClickedAt || new Date(),
+        emailOpenedAt: cart.emailOpenedAt || new Date(),
+      },
+    });
+    return formatRecoveryUrl(tok, 'email');
+  }
+
+  const interest = await prisma.abandonedProductInterest.findFirst({
+    where: { recoveryToken: tok },
+    include: { product: { select: { slug: true } } },
+  });
+  if (interest?.product?.slug) {
+    await prisma.abandonedProductInterest.update({
+      where: { id: interest.id },
+      data: {
+        emailClickedAt: interest.emailClickedAt || new Date(),
+        emailOpenedAt: interest.emailOpenedAt || new Date(),
+      },
+    });
+    return formatProductRecoveryUrl(interest.product.slug, 'email');
+  }
+
+  const order = await prisma.order.findFirst({
+    where: { cancelledRecoveryToken: tok },
+    select: {
+      id: true,
+      cancelledRecoveryEmailClickedAt: true,
+      cancelledRecoveryEmailOpenedAt: true,
     },
   });
-  return formatRecoveryUrl(token, 'email');
+  if (!order) return null;
+
+  await prisma.order.update({
+    where: { id: order.id },
+    data: {
+      cancelledRecoveryEmailClickedAt: order.cancelledRecoveryEmailClickedAt || new Date(),
+      cancelledRecoveryEmailOpenedAt: order.cancelledRecoveryEmailOpenedAt || new Date(),
+    },
+  });
+  return formatCancelledOrderRecoveryUrl(tok, 'email');
+}
+
+async function getCancelledOrderByReorderToken(token) {
+  if (!token) return null;
+  const order = await prisma.order.findFirst({
+    where: {
+      cancelledRecoveryToken: String(token),
+      status: 'CANCELLED',
+    },
+    include: {
+      items: {
+        include: {
+          product: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+              imageUrl: true,
+              price: true,
+              isActive: true,
+              isVisible: true,
+              stockQuantity: true,
+            },
+          },
+          variant: {
+            select: {
+              id: true,
+              name: true,
+              imageUrl: true,
+              price: true,
+              isActive: true,
+              isVisible: true,
+              stockQuantity: true,
+            },
+          },
+        },
+      },
+    },
+  });
+  return order;
+}
+
+/**
+ * Monta payload de carrinho a partir de um pedido cancelado.
+ * Usa preço/estoque atuais; ignora itens indisponíveis.
+ */
+function buildReorderPayload(order) {
+  if (!order) return null;
+
+  const { priceToCents } = require('../utils/productStore');
+  const items = [];
+  let skipped = 0;
+
+  for (const item of order.items || []) {
+    const product = item.product;
+    if (!product?.isActive || !product?.isVisible) {
+      skipped += 1;
+      continue;
+    }
+
+    if (item.variantId) {
+      const variant = item.variant;
+      if (!variant?.isActive || variant.isVisible === false || (variant.stockQuantity ?? 0) <= 0) {
+        skipped += 1;
+        continue;
+      }
+      const qty = Math.min(
+        Math.max(1, item.quantity || 1),
+        Math.max(1, variant.stockQuantity || 1)
+      );
+      items.push({
+        productId: product.id,
+        variantId: variant.id,
+        quantity: qty,
+        name: `${product.name} — ${variant.name}`,
+        image: variant.imageUrl || product.imageUrl || null,
+        price: priceToCents(variant.price),
+        slug: product.slug || null,
+      });
+      continue;
+    }
+
+    if ((product.stockQuantity ?? 0) <= 0) {
+      skipped += 1;
+      continue;
+    }
+    const qty = Math.min(
+      Math.max(1, item.quantity || 1),
+      Math.max(1, product.stockQuantity || 1)
+    );
+    items.push({
+      productId: product.id,
+      variantId: null,
+      quantity: qty,
+      name: product.name,
+      image: product.imageUrl || null,
+      price: priceToCents(product.price),
+      slug: product.slug || null,
+    });
+  }
+
+  return {
+    orderId: order.id,
+    couponCode: order.couponCode || null,
+    items,
+    skipped,
+  };
+}
+
+async function markCancelledOrderReorderOpened(token) {
+  if (!token) return;
+  await prisma.order.updateMany({
+    where: { cancelledRecoveryToken: String(token) },
+    data: {
+      cancelledRecoveryEmailClickedAt: new Date(),
+      cancelledRecoveryEmailOpenedAt: new Date(),
+    },
+  });
 }
 
 async function markCartRecovered(token) {
@@ -926,6 +1224,8 @@ async function attachRecoveryToOrder(tx, { orderId, recoveryToken, recoverySourc
 }
 
 module.exports = {
+  AUTOMATION_HIDDEN_NOTE,
+  PAYMENT_RECOVERY_CANCEL_NOTES,
   getAutomationMetrics,
   listAbandonedCarts,
   getAbandonedCart,
@@ -935,8 +1235,16 @@ module.exports = {
   archiveUnpaidOrder,
   createOrderFromAbandonedCart,
   ensureCartToken,
+  ensureProductInterestToken,
+  ensureCancelledOrderToken,
   formatRecoveryUrl,
+  formatProductRecoveryUrl,
+  formatStoreRecoveryUrl,
+  formatCancelledOrderRecoveryUrl,
   getCartByRecoveryToken,
+  getCancelledOrderByReorderToken,
+  buildReorderPayload,
+  markCancelledOrderReorderOpened,
   trackEmailOpen,
   trackEmailClick,
   markCartRecovered,

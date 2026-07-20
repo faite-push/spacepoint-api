@@ -89,4 +89,9 @@ router.get(
   MarketingAutomationsController.recoverCart.bind(MarketingAutomationsController)
 );
 
+router.get(
+  '/v2/api/order/reorder/:token',
+  MarketingAutomationsController.reorderCancelledOrder.bind(MarketingAutomationsController)
+);
+
 module.exports = router;

@@ -1,8 +1,12 @@
 const { prisma } = require('../config/prisma');
 const emailService = require('./email.service');
-const { abandonedCartRecoveryEmail, withEmailLayout } = require('../utils/emailTemplates');
-const { ensureCartToken, formatRecoveryUrl } = require('./marketingAutomations.service');
+const { abandonedProductRecoveryEmail, withEmailLayout } = require('../utils/emailTemplates');
+const {
+  ensureProductInterestToken,
+  formatProductRecoveryUrl,
+} = require('./marketingAutomations.service');
 const { getEmailTemplates } = require('../utils/emailTemplatesSettings');
+const { priceToCents } = require('../utils/productStore');
 const { parseSentMap, mergeSentMap } = require('../utils/recoverySequence');
 
 const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
@@ -13,7 +17,7 @@ function queueEmail(taskName, fn) {
     try {
       await fn();
     } catch (err) {
-      console.error(`[abandonedCartEmail.${taskName}]`, err.message);
+      console.error(`[abandonedProductEmail.${taskName}]`, err.message);
     }
   });
 }
@@ -38,49 +42,69 @@ async function loadSiteBranding() {
   };
 }
 
-async function loadCartContext(cartId, { delayHours, stepIndex } = {}) {
-  const cart = await prisma.abandonedCart.findUnique({
-    where: { id: cartId },
+async function loadInterestContext(interestId, { delayHours, stepIndex } = {}) {
+  const interest = await prisma.abandonedProductInterest.findUnique({
+    where: { id: interestId },
     include: {
-      items: {
-        include: {
-          product: { select: { name: true } },
-          variant: { select: { name: true } },
+      product: {
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          imageUrl: true,
+          price: true,
+          isActive: true,
+          isVisible: true,
         },
+      },
+      variant: {
+        select: { id: true, name: true, price: true, imageUrl: true },
       },
       user: { select: { name: true, email: true } },
     },
   });
 
-  if (!cart || cart.convertedAt || !cart.items.length) {
+  if (
+    !interest ||
+    interest.convertedAt ||
+    interest.archivedAt ||
+    !interest.product?.isActive ||
+    !interest.product?.isVisible
+  ) {
     return null;
   }
 
   if (delayHours) {
-    const sentMap = parseSentMap(cart.recoveryEmailsSent, cart.recoveryEmailSentAt, delayHours);
+    const sentMap = parseSentMap(
+      interest.recoveryEmailsSent,
+      interest.recoveryEmailSentAt,
+      delayHours
+    );
     if (sentMap[delayHours]) return null;
   }
 
-  const customerEmail = cart.email || cart.user?.email;
+  const customerEmail = interest.email || interest.user?.email;
   if (!isValidEmail(customerEmail)) return null;
 
-  const token = await ensureCartToken(cartId);
+  const token = await ensureProductInterestToken(interestId);
+  if (!token) return null;
+
   const branding = await loadSiteBranding();
-  const items = cart.items.map((item) => ({
-    label: item.variant?.name
-      ? `${item.product.name} — ${item.variant.name}`
-      : item.product.name,
-    quantity: item.quantity,
-    unitPrice: item.unitPrice,
-  }));
+  const unitPrice = interest.variant
+    ? priceToCents(interest.variant.price)
+    : priceToCents(interest.product.price);
+  const label = interest.variant?.name
+    ? `${interest.product.name} — ${interest.variant.name}`
+    : interest.product.name;
+  const imageUrl = interest.variant?.imageUrl || interest.product.imageUrl || null;
 
   const trackBase = API_PUBLIC_URL || FRONTEND_URL;
-  const checkoutUrl = `${trackBase}/v2/api/marketing/track/click/${token}`;
+  const productUrl = `${trackBase}/v2/api/marketing/track/click/${token}`;
   const openPixelUrl = `${trackBase}/v2/api/marketing/track/open/${token}.gif`;
 
   return withEmailLayout(
     {
-      cart,
+      interest,
       storeName: branding.storeName,
       logoUrl: branding.logoUrl,
       logoWhiteUrl: branding.logoWhiteUrl,
@@ -88,17 +112,22 @@ async function loadCartContext(cartId, { delayHours, stepIndex } = {}) {
       customBodies: branding.customBodies,
       customSubjects: branding.customSubjects,
       customPreheaders: branding.customPreheaders,
-      customerName: cart.customerName || cart.user?.name || 'Cliente',
+      customerName: interest.customerName || interest.user?.name || 'Cliente',
       customerEmail,
-      items,
-      subtotal: cart.subtotalCents,
-      couponCode: cart.couponCode,
-      checkoutUrl,
+      items: [
+        {
+          label,
+          quantity: 1,
+          unitPrice,
+          imageUrl,
+        },
+      ],
+      unitPrice,
+      productUrl,
       openPixelUrl,
       storeUrl: branding.storeUrl || FRONTEND_URL,
-      recoveryUrl: formatRecoveryUrl(token),
+      recoveryUrl: formatProductRecoveryUrl(interest.product.slug, 'email'),
       stepIndex: stepIndex || 1,
-      delayHours: delayHours || null,
     },
     {
       headerHtml: branding.headerHtml,
@@ -110,21 +139,20 @@ async function loadCartContext(cartId, { delayHours, stepIndex } = {}) {
   );
 }
 
-function notifyAbandonedCartRecovery(cartId, step = {}) {
+function notifyAbandonedProductRecovery(interestId, step = {}) {
   const delayHours = step.delayHours || null;
   const stepIndex = step.stepIndex || 1;
 
-  queueEmail('notifyAbandonedCartRecovery', async () => {
-    const ctx = await loadCartContext(cartId, { delayHours, stepIndex });
+  queueEmail('notifyAbandonedProductRecovery', async () => {
+    const ctx = await loadInterestContext(interestId, { delayHours, stepIndex });
     if (!ctx) return;
 
-    const template = abandonedCartRecoveryEmail({
+    const template = abandonedProductRecoveryEmail({
       storeName: ctx.storeName,
       customerName: ctx.customerName,
       items: ctx.items,
-      subtotal: ctx.subtotal,
-      couponCode: ctx.couponCode,
-      checkoutUrl: ctx.checkoutUrl,
+      unitPrice: ctx.unitPrice,
+      productUrl: ctx.productUrl,
       openPixelUrl: ctx.openPixelUrl,
       storeUrl: ctx.storeUrl,
       headerHtml: ctx.headerHtml,
@@ -145,23 +173,23 @@ function notifyAbandonedCartRecovery(cartId, step = {}) {
     );
 
     if (sent) {
-      const cart = await prisma.abandonedCart.findUnique({
-        where: { id: cartId },
+      const row = await prisma.abandonedProductInterest.findUnique({
+        where: { id: interestId },
         select: { recoveryEmailSentAt: true, recoveryEmailsSent: true },
       });
       const sentMap = parseSentMap(
-        cart?.recoveryEmailsSent,
-        cart?.recoveryEmailSentAt,
+        row?.recoveryEmailsSent,
+        row?.recoveryEmailSentAt,
         delayHours || 1
       );
       const nextMap = delayHours
         ? mergeSentMap(sentMap, delayHours)
         : mergeSentMap(sentMap, 1);
 
-      await prisma.abandonedCart.update({
-        where: { id: cartId },
+      await prisma.abandonedProductInterest.update({
+        where: { id: interestId },
         data: {
-          recoveryEmailSentAt: cart?.recoveryEmailSentAt || new Date(),
+          recoveryEmailSentAt: row?.recoveryEmailSentAt || new Date(),
           recoveryEmailsSent: nextMap,
         },
       });
@@ -170,5 +198,5 @@ function notifyAbandonedCartRecovery(cartId, step = {}) {
 }
 
 module.exports = {
-  notifyAbandonedCartRecovery,
+  notifyAbandonedProductRecovery,
 };

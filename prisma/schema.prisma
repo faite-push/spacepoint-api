@@ -32,6 +32,7 @@ model User {
   wishlistItems WishlistItem[]
   newsletterSubscriptions NewsletterSubscriber[]
   abandonedCart AbandonedCart?
+  abandonedProductInterests AbandonedProductInterest[]
   adminAuditLogs AdminAuditLog[]
   role         Role?         @relation(fields: [roleId], references: [id])
   assignedChats Chat[]       @relation("ChatAssignee")
@@ -103,6 +104,7 @@ model Product {
   showcaseSections         HomeShowcaseSectionProduct[]
   wishlistItems            WishlistItem[]
   abandonedCartItems       AbandonedCartItem[]
+  abandonedProductInterests AbandonedProductInterest[]
 
   @@index([slug])
   @@index([categoryId])
@@ -137,6 +139,7 @@ model ProductVariant {
   orderItems               OrderItem[]
   codes                    ProductCode[]
   abandonedCartItems       AbandonedCartItem[]
+  abandonedProductInterests AbandonedProductInterest[]
   product                  Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   @@index([productId, sortOrder])
@@ -183,6 +186,13 @@ model Order {
   userAgent           String?
   recoveredFromCartId String?
   recoverySource      String?
+  cancelledRecoveryToken           String?   @unique
+  cancelledRecoveryEmailSentAt     DateTime?
+  /** Mapa { "1": ISO, "24": ISO } dos delays já enviados na régua de cancelados. */
+  cancelledRecoveryEmailsSent      Json?
+  cancelledRecoveryEmailOpenedAt   DateTime?
+  cancelledRecoveryEmailClickedAt  DateTime?
+  cancelledRecoveryConvertedAt     DateTime?
   chat                Chat?
   couponUsage         CouponUsage?
   user                User           @relation(fields: [userId], references: [id])
@@ -194,6 +204,7 @@ model Order {
   @@index([status])
   @@index([recoveredFromCartId])
   @@index([recoverySource, paidAt])
+  @@index([status, cancelledRecoveryEmailSentAt, updatedAt])
 }
 
 model OrderItem {
@@ -405,6 +416,8 @@ model AbandonedCart {
   lastActivityAt      DateTime            @default(now())
   recoveryToken       String?             @unique
   recoveryEmailSentAt DateTime?
+  /** Mapa { "1": ISO, "12": ISO } dos delays já enviados na régua. */
+  recoveryEmailsSent  Json?
   emailOpenedAt       DateTime?
   emailClickedAt      DateTime?
   convertedAt         DateTime?
@@ -437,6 +450,38 @@ model AbandonedCartItem {
   variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
 
   @@index([cartId])
+  @@index([productId])
+}
+
+/** Visitante viu o produto sem montar carrinho — usado na automação de abandono de produto. */
+model AbandonedProductInterest {
+  id                  String          @id @default(cuid())
+  userId              String?
+  visitorId           String
+  email               String?
+  customerName        String?
+  productId           String
+  variantId           String?
+  lastViewedAt        DateTime        @default(now())
+  recoveryToken       String?         @unique
+  recoveryEmailSentAt DateTime?
+  /** Mapa { "1": ISO, "24": ISO } dos delays já enviados na régua. */
+  recoveryEmailsSent  Json?
+  emailOpenedAt       DateTime?
+  emailClickedAt      DateTime?
+  convertedAt         DateTime?
+  archivedAt          DateTime?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  user                User?           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  product             Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant             ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  @@unique([visitorId, productId])
+  @@index([email, lastViewedAt])
+  @@index([recoveryEmailSentAt, lastViewedAt, convertedAt])
+  @@index([archivedAt, lastViewedAt])
+  @@index([userId, productId])
   @@index([productId])
 }
 

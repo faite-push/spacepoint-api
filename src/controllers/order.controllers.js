@@ -258,6 +258,21 @@ class OrderController {
       if (!recoveryToken) {
         cartService.markConverted({ userId }).catch(() => {});
       }
+      try {
+        const productIds = (order.items || []).map((i) => i.productId).filter(Boolean);
+        require('../services/productInterest.service')
+          .markConvertedForOrder({
+            userId,
+            email: req.user?.email || req.body?.checkoutData?.email,
+            productIds,
+          })
+          .catch(() => {});
+        require('../services/cancelledOrderEmail.service')
+          .markCancelledRecoveryConverted(userId)
+          .catch(() => {});
+      } catch {
+        /* ignore */
+      }
 
       return res.status(201).json({ order });
     } catch (err) {
