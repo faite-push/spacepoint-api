@@ -3,6 +3,8 @@ const ALL_PERMISSIONS = [
   { key: 'system:admin', name: 'Administrator', category: 'system' },
 
   { key: 'analytics:view', name: 'Ver Dashboard', category: 'analytics' },
+  { key: 'marketing:view', name: 'Ver Marketing', category: 'marketing' },
+  { key: 'marketing:manage', name: 'Gerenciar Marketing', category: 'marketing' },
 
   { key: 'products:view', name: 'Ver Produtos', category: 'products' },
   { key: 'products:create', name: 'Criar Produtos', category: 'products' },
@@ -52,6 +54,7 @@ const ALL_PERMISSIONS = [
 const PERMISSION_CATEGORY_ORDER = [
   'system',
   'analytics',
+  'marketing',
   'products',
   'codes',
   'orders',
@@ -84,7 +87,7 @@ const ADMIN_ROLE_PERMISSIONS = [
   'users:view', 'users:edit',
   'roles:view',
   'pages:manage', 'gateways:manage', 'plugins:manage', 'settings:manage',
-  'analytics:view', 'audit:view',
+  'analytics:view', 'marketing:view', 'marketing:manage', 'audit:view',
 ];
 
 const MODERATOR_ROLE_PERMISSIONS = [
@@ -96,6 +99,7 @@ const MODERATOR_ROLE_PERMISSIONS = [
   'reviews:view',
   'users:view',
   'analytics:view',
+  'marketing:view',
 ];
 
 function roleHasFullAccess(permissionKeys = []) {

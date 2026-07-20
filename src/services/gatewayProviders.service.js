@@ -454,34 +454,59 @@ async function createPagBankCard(order, gateway) {
 
   const { customerName, customerEmail, customerCpf } = resolveCustomerFromOrder(order);
 
+  const items = (order.items || []).length
+    ? (order.items || []).map((item, idx) => ({
+      reference_id: `ITEM${idx + 1}`,
+      name: String(item.product?.name || item.variantName || 'Produto')
+        .replace(/[^\w\sÀ-ÿ\-.,()/+&]/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 100) || 'Produto',
+      quantity: Math.max(1, Number(item.quantity) || 1),
+      unit_amount: Math.max(1, Number(item.unitPrice) || Number(order.total) || 1),
+    }))
+    : [{
+      reference_id: 'ITEM1',
+      name: 'Pedido',
+      quantity: 1,
+      unit_amount: Math.max(1, Number(order.total) || 1),
+    }];
+
   const payload = {
-    reference_id: order.id,
+    reference_id: String(order.id).slice(0, 64),
     customer: {
-      name: customerName.slice(0, 80),
-      email: customerEmail,
+      name: String(customerName || 'Cliente').slice(0, 80),
+      email: String(customerEmail || 'cliente@email.com').slice(0, 60),
       tax_id: customerCpf && customerCpf.length === 11 ? customerCpf : '12345678909',
     },
-    items: (order.items || []).length
-      ? (order.items || []).map((item, idx) => ({
-        reference_id: String(idx + 1),
-        name: (item.product?.name || item.variantName || 'Produto').slice(0, 100),
-        quantity: item.quantity || 1,
-        unit_amount: item.unitPrice || order.total,
-      }))
-      : [{
-        reference_id: '1',
-        name: 'Pedido',
-        quantity: 1,
-        unit_amount: order.total,
-      }],
+    customer_modifiable: true,
+    items,
+    // Checkout PagBank: CREDIT_CARD com brands evita invalid_list_element_value no sandbox.
+    // DEBIT_CARD sem brands costuma falhar em alguns ambientes de teste.
     payment_methods: [
-      { type: 'CREDIT_CARD' },
-      { type: 'DEBIT_CARD' },
+      {
+        type: 'CREDIT_CARD',
+        brands: ['VISA', 'MASTERCARD', 'ELO', 'AMEX', 'HIPERCARD'],
+      },
     ],
   };
 
   const pagbankWebhook = webhookUrl('/v1/webhooks/pagbank');
-  if (pagbankWebhook) payload.notification_urls = [pagbankWebhook];
+  // Mesma regra do PIX: localhost/URLs privadas falham no PagBank (invalid_list_element_value).
+  if (
+    pagbankWebhook
+    && !pagbankWebhook.includes('localhost')
+    && !pagbankWebhook.includes('127.0.0.1')
+    && pagbankWebhook.startsWith('https://')
+  ) {
+    payload.notification_urls = [pagbankWebhook.slice(0, 100)];
+    payload.payment_notification_urls = [pagbankWebhook.slice(0, 100)];
+  }
+
+  const storeUrl = String(process.env.FRONTEND_URL || '').replace(/\/$/, '');
+  if (storeUrl.startsWith('https://')) {
+    payload.return_url = `${storeUrl}/checkout/payment/${order.id}`.slice(0, 255);
+  }
 
   try {
     const { data } = await axios.post(
@@ -506,10 +531,14 @@ async function createPagBankCard(order, gateway) {
 
     return saveCardPayment(order, 'pagbank', data.id, metadata);
   } catch (err) {
-    const msg = err?.response?.data?.error_messages?.[0]?.description
-      || err?.response?.data?.message
+    const errorData = err?.response?.data;
+    const first = errorData?.error_messages?.[0];
+    const msg = first?.description
+      || errorData?.message
       || err.message;
-    throw new Error(`PagBank: ${msg}`);
+    const param = first?.parameter_name ? ` (${first.parameter_name})` : '';
+    console.error('[createPagBankCard Error Detail]', JSON.stringify(errorData, null, 2));
+    throw new Error(`PagBank: ${msg}${param}`);
   }
 }
 

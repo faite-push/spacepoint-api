@@ -131,6 +131,33 @@ function stripCpf(value) {
   return String(value || '').replace(/\D/g, '');
 }
 
+function stripPhone(value) {
+  return String(value || '').replace(/\D/g, '');
+}
+
+/**
+ * Persiste CPF e celular no perfil do usuário a partir do checkout.
+ * Mantém histórico no pedido (checkoutData) e espelha no cadastro do cliente.
+ */
+async function syncUserProfileFromCheckout(tx, userId, checkoutData) {
+  const data = checkoutData && typeof checkoutData === 'object' ? checkoutData : {};
+  const document = stripCpf(data.cpf);
+  const phone = stripPhone(data.phone);
+  const name = String(data.name || '').trim();
+
+  const update = {};
+  if (name) update.name = name.slice(0, 120);
+  if (document.length === 11) update.document = document;
+  if (phone.length >= 10 && phone.length <= 13) update.phone = phone;
+
+  if (!Object.keys(update).length) return null;
+
+  return tx.user.update({
+    where: { id: userId },
+    data: update,
+  });
+}
+
 function isValidCpf(value) {
   const cpf = stripCpf(value);
   if (cpf.length !== 11 || /^(\d)\1+$/.test(cpf)) return false;
@@ -204,7 +231,7 @@ function resolveCustomerFromOrder(order) {
     customerName: String(data.name || order?.user?.name || 'Cliente').trim(),
     customerEmail: String(data.email || order?.user?.email || 'cliente@spacepoint.com').trim(),
     customerCpf: stripCpf(data.cpf),
-    customerPhone: stripCpf(data.phone),
+    customerPhone: stripPhone(data.phone),
   };
 }
 
@@ -216,6 +243,8 @@ module.exports = {
   resolveEffectiveCheckoutFields,
   validateCheckoutData,
   resolveCustomerFromOrder,
+  syncUserProfileFromCheckout,
   stripCpf,
+  stripPhone,
   isValidCpf,
 };

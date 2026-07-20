@@ -2,7 +2,7 @@ const cron = require('node-cron');
 const { prisma } = require('../config/prisma');
 const { expireStalePendingOrders } = require('./orderFulfillment.service');
 const { getReviewsSettings } = require('../utils/reviewsSettings');
-const { getAbandonedCartSettings } = require('../utils/abandonedCartSettings');
+const { getAbandonedCartSettings, isWithinNotificationWindow } = require('../utils/abandonedCartSettings');
 const orderEmailService = require('./orderEmail.service');
 const cartService = require('./cart.service');
 const abandonedCartEmailService = require('./abandonedCartEmail.service');
@@ -36,10 +36,19 @@ async function sendReviewReminders() {
 
 async function sendAbandonedCartReminders() {
   const settings = await getAbandonedCartSettings(prisma);
-  if (!settings.enabled || settings.sendRecoveryEmail === false) return 0;
+  if (!settings.enabled || settings.sendRecoveryEmail === false || settings.cartSendMode === 'manual') {
+    return 0;
+  }
+  if (!isWithinNotificationWindow(settings)) return 0;
+
+  const delayHours =
+    Array.isArray(settings.cartEmailDelays) && settings.cartEmailDelays.length
+      ? Math.min(...settings.cartEmailDelays)
+      : settings.delayHours;
 
   const cartIds = await cartService.listRecoverableCartIds({
-    delayHours: settings.delayHours,
+    delayHours,
+    inactivityMinutes: settings.inactivityMinutes,
     minSubtotalCents: settings.minSubtotalCents,
     limit: 50,
   });

@@ -3,6 +3,8 @@ const {
   ALL_PERMISSIONS,
   groupPermissions,
   FULL_ACCESS_PERMISSION,
+  ADMIN_ROLE_PERMISSIONS,
+  MODERATOR_ROLE_PERMISSIONS,
 } = require('../config/permissions');
 const { isSuperOwner } = require('../utils/auth');
 const {
@@ -18,6 +20,11 @@ const hasSuperOwnerPermission = async (userId) => {
   });
   return isSuperOwner(user?.email);
 };
+
+const DEFAULT_ROLE_PERMISSION_SETS = [
+  { name: 'Administrador', keys: ADMIN_ROLE_PERMISSIONS },
+  { name: 'Moderador', keys: MODERATOR_ROLE_PERMISSIONS },
+];
 
 async function ensurePermissionsSynced() {
   for (const perm of ALL_PERMISSIONS) {
@@ -39,6 +46,29 @@ async function ensurePermissionsSynced() {
       data: {
         permissions: {
           set: ALL_PERMISSIONS.map((p) => ({ key: p.key })),
+        },
+      },
+    });
+  }
+
+  // Garante que cargos padrão incluam permissões novas (ex.: marketing),
+  // sem apagar chaves extras já concedidas manualmente.
+  for (const def of DEFAULT_ROLE_PERMISSION_SETS) {
+    const role = await prisma.role.findUnique({
+      where: { name: def.name },
+      select: { id: true, permissions: { select: { key: true } } },
+    });
+    if (!role) continue;
+
+    const current = new Set(role.permissions.map((p) => p.key));
+    const missing = def.keys.filter((key) => !current.has(key));
+    if (!missing.length) continue;
+
+    await prisma.role.update({
+      where: { id: role.id },
+      data: {
+        permissions: {
+          connect: missing.map((key) => ({ key })),
         },
       },
     });
@@ -68,6 +98,7 @@ class RoleController {
 
   async getAllRoles(req, res) {
     try {
+      await ensurePermissionsSynced();
       const roles = await prisma.role.findMany({
         include: {
           _count: {

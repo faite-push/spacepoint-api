@@ -1,3 +1,12 @@
+const {
+  applyEmailTemplate,
+  buildEmailDocument,
+  normalizeEmailTemplates,
+  DEFAULT_HEADER_HTML,
+  DEFAULT_FOOTER_HTML,
+  DEFAULT_BODIES,
+} = require('./emailTemplatesSettings');
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -33,38 +42,81 @@ function layout({
   ctaLabel,
   ctaUrl,
   footerNote,
+  headerHtml,
+  footerHtml,
+  logoUrl,
+  logoWhiteUrl,
+  contactEmail,
+  storeUrl,
+  customerName,
+  orderId,
+  itemsHtml,
+  totalLabel,
+  paymentExpiresLabel,
+  copyPaste,
+  couponCode,
+  reason,
+  unsubscribeUrl,
+  customBodyHtml,
 }) {
-  const safeStore = escapeHtml(storeName || 'Space Point');
-  const safeTitle = escapeHtml(title);
-  const safeSubtitle = subtitle ? escapeHtml(subtitle) : '';
+  const FRONTEND = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+  const vars = {
+    storeName: storeName || 'Space Point',
+    title: title || '',
+    subtitle: subtitle || '',
+    logoUrl: logoUrl || `${FRONTEND}/logo.png`,
+    logoWhiteUrl: logoWhiteUrl || `${FRONTEND}/logo-white.png`,
+    contactEmail: contactEmail || '',
+    storeUrl: storeUrl || FRONTEND,
+    year: String(new Date().getFullYear()),
+    footerNote: footerNote || storeName || 'Space Point',
+    customerName: customerName || 'Cliente',
+    orderId: orderId || '',
+    itemsHtml: itemsHtml || '',
+    totalLabel: totalLabel || '',
+    paymentExpiresLabel: paymentExpiresLabel || '',
+    copyPaste: copyPaste || '',
+    couponCode: couponCode || '',
+    reason: reason || '',
+    ctaUrl: ctaUrl || storeUrl || FRONTEND,
+    ctaLabel: ctaLabel || 'Abrir loja',
+    unsubscribeUrl: unsubscribeUrl || '#',
+  };
+
   const ctaBlock = ctaLabel && ctaUrl
-    ? `<div style="text-align:center;margin:28px 0 8px;">
-        <a href="${escapeHtml(ctaUrl)}" style="display:inline-block;background:#06b6d4;color:#0a0a0a;text-decoration:none;font-weight:700;padding:12px 24px;border-radius:8px;font-size:14px;">
+    ? `<div style="text-align:center;margin:22px 0;">
+        <a href="${escapeHtml(ctaUrl)}" style="display:inline-block;background:#A855F7;color:#0a0a0a;text-decoration:none;font-weight:700;padding:12px 40px;border-radius:10px;font-size:17px;">
           ${escapeHtml(ctaLabel)}
         </a>
       </div>`
     : '';
 
-  return `<!DOCTYPE html>
-<html lang="pt-BR">
-  <body style="margin:0;padding:24px;background:#050505;font-family:Arial,sans-serif;">
-    <div style="max-width:520px;margin:0 auto;background:#0a0a0a;border:1px solid #1f1f23;border-radius:14px;overflow:hidden;color:#fafafa;">
-      <div style="padding:24px 24px 12px;text-align:center;border-bottom:1px solid #1f1f23;">
-        <div style="font-size:12px;letter-spacing:2px;color:#71717a;text-transform:uppercase;">${safeStore}</div>
-        <h1 style="margin:12px 0 0;font-size:22px;color:#06b6d4;">${safeTitle}</h1>
-        ${safeSubtitle ? `<p style="margin:8px 0 0;color:#a1a1aa;font-size:14px;">${safeSubtitle}</p>` : ''}
-      </div>
-      <div style="padding:24px;color:#d4d4d8;font-size:14px;line-height:1.6;">
-        ${bodyHtml}
-        ${ctaBlock}
-        ${footerNote ? `<p style="margin-top:24px;color:#71717a;font-size:12px;text-align:center;">${escapeHtml(footerNote)}</p>` : ''}
-      </div>
-    </div>
-    <p style="max-width:520px;margin:12px auto 0;color:#52525b;font-size:11px;text-align:center;">
-      Este é um e-mail automático. Se você não reconhece esta compra, entre em contato com o suporte.
-    </p>
-  </body>
-</html>`;
+  const resolvedBody = customBodyHtml
+    ? applyEmailTemplate(customBodyHtml, vars)
+    : `${bodyHtml}${ctaBlock}`;
+
+  return buildEmailDocument({
+    headerHtml: headerHtml || DEFAULT_HEADER_HTML,
+    footerHtml: footerHtml || DEFAULT_FOOTER_HTML,
+    bodyHtml: resolvedBody,
+    vars,
+  });
+}
+
+/** Anexa branding/templates salvos no SiteConfig aos dados do e-mail */
+function withEmailLayout(data = {}, templates = null) {
+  const normalized = normalizeEmailTemplates(templates);
+  const FRONTEND = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+  return {
+    ...data,
+    headerHtml: normalized.headerHtml,
+    footerHtml: normalized.footerHtml,
+    customBodies: data.customBodies || normalized.bodies,
+    logoUrl: data.logoUrl || '',
+    logoWhiteUrl: data.logoWhiteUrl || `${FRONTEND}/logo-white.png`,
+    storeUrl: data.storeUrl || FRONTEND,
+    contactEmail: data.contactEmail || '',
+  };
 }
 
 function renderOrderItems(items) {
@@ -74,213 +126,170 @@ function renderOrderItems(items) {
     const name = escapeHtml(item.label);
     const qty = Number(item.quantity) || 1;
     const price = formatBrl(item.unitPrice * qty);
+    const image = item.imageUrl
+      ? `<img src="${escapeHtml(item.imageUrl)}" alt="" width="80" style="border-radius:8px;object-fit:contain;display:block;" />`
+      : '';
     return `<tr>
-      <td style="padding:10px 0;border-bottom:1px solid #1f1f23;color:#fafafa;">${name}</td>
-      <td style="padding:10px 0;border-bottom:1px solid #1f1f23;color:#a1a1aa;text-align:center;">${qty}x</td>
-      <td style="padding:10px 0;border-bottom:1px solid #1f1f23;color:#fafafa;text-align:right;">${price}</td>
+      ${image ? `<td style="width:100px;vertical-align:middle;padding:6px 10px 6px 0;">${image}</td>` : ''}
+      <td style="vertical-align:middle;text-align:left;padding:6px 0;">
+        <h3 style="margin:0;font-size:17px;color:#ffffff;font-weight:600;">${name}</h3>
+        <p style="margin:4px 0 0;font-size:18px;color:#A855F7;font-weight:700;">${price}</p>
+        <p style="margin:2px 0 0;color:#a1a1aa;font-size:13px;">${qty}x</p>
+      </td>
     </tr>`;
   }).join('');
 
-  return `<table style="width:100%;border-collapse:collapse;margin:16px 0;">
-    <thead>
-      <tr>
-        <th style="text-align:left;color:#71717a;font-size:12px;padding-bottom:8px;">Produto</th>
-        <th style="text-align:center;color:#71717a;font-size:12px;padding-bottom:8px;">Qtd</th>
-        <th style="text-align:right;color:#71717a;font-size:12px;padding-bottom:8px;">Total</th>
-      </tr>
-    </thead>
-    <tbody>${rows}</tbody>
-  </table>`;
+  return `<table style="width:100%;border-collapse:collapse;">${rows}</table>`;
 }
 
-function renderOrderSummary(data) {
-  const parts = [
-    `<p>Olá, <strong>${escapeHtml(data.customerName)}</strong>!</p>`,
-    `<p>Pedido <strong>#${escapeHtml(data.orderId)}</strong></p>`,
-    renderOrderItems(data.items),
-  ];
+function resolveBodyTemplate(data, key) {
+  const custom = data.customBodies?.[key];
+  if (typeof custom === 'string' && custom.trim()) return custom;
+  return DEFAULT_BODIES[key] || null;
+}
 
-  if (data.discount > 0) {
-    parts.push(`<p style="color:#a1a1aa;">Desconto: <span style="color:#22c55e;">-${formatBrl(data.discount)}</span></p>`);
-  }
-  if (data.deliveryFee > 0) {
-    parts.push(`<p style="color:#a1a1aa;">Taxa de entrega: ${formatBrl(data.deliveryFee)}</p>`);
-  }
-
-  parts.push(`<p style="font-size:16px;margin-top:8px;">Total: <strong style="color:#06b6d4;">${formatBrl(data.total)}</strong></p>`);
-  return parts.join('');
+function sharedLayoutFields(data, extras = {}) {
+  return {
+    storeName: data.storeName,
+    headerHtml: data.headerHtml,
+    footerHtml: data.footerHtml,
+    logoUrl: data.logoUrl,
+    logoWhiteUrl: data.logoWhiteUrl,
+    contactEmail: data.contactEmail,
+    storeUrl: data.storeUrl,
+    customerName: data.customerName,
+    orderId: data.orderId,
+    itemsHtml: extras.itemsHtml ?? (data.items ? renderOrderItems(data.items) : ''),
+    totalLabel: extras.totalLabel ?? (data.total != null ? formatBrl(data.total) : ''),
+    paymentExpiresLabel: extras.paymentExpiresLabel || '',
+    copyPaste: extras.copyPaste || '',
+    couponCode: extras.couponCode || data.couponCode || '',
+    reason: extras.reason || '',
+    unsubscribeUrl: data.unsubscribeUrl || '#',
+    footerNote: data.storeName,
+  };
 }
 
 function orderCreatedEmail(data) {
-  const bodyHtml = [
-    renderOrderSummary(data),
-    '<p>Recebemos seu pedido e ele está aguardando pagamento. Finalize agora para garantir seus produtos.</p>',
-    data.paymentExpiresAt
-      ? `<p style="color:#a1a1aa;font-size:13px;">O pagamento expira em <strong>${formatDateTime(data.paymentExpiresAt)}</strong>.</p>`
-      : '',
-  ].join('');
-
   return {
     subject: `Pedido #${data.orderId} recebido — ${data.storeName}`,
     html: layout({
-      storeName: data.storeName,
+      ...sharedLayoutFields(data, {
+        paymentExpiresLabel: data.paymentExpiresAt ? formatDateTime(data.paymentExpiresAt) : '',
+      }),
       title: 'Pedido recebido',
       subtitle: 'Aguardando pagamento',
-      bodyHtml,
+      bodyHtml: '',
       ctaLabel: 'Pagar agora',
       ctaUrl: data.paymentUrl,
-      footerNote: data.storeName,
+      customBodyHtml: resolveBodyTemplate(data, 'orderCreated'),
     }),
   };
 }
 
 function paymentPendingEmail(data) {
   const isPix = data.paymentMethod === 'PIX';
-  const bodyParts = [
-    renderOrderSummary(data),
-    isPix
-      ? '<p>Seu PIX foi gerado. Copie o código abaixo ou acesse a página de pagamento para concluir a compra.</p>'
-      : '<p>Seu link de pagamento está pronto. Acesse a página abaixo para concluir a compra com cartão.</p>',
-  ];
-
-  if (isPix && data.copyPaste) {
-    bodyParts.push(`<div style="background:#141417;border-radius:8px;padding:16px;margin:16px 0;word-break:break-all;font-family:monospace;font-size:12px;color:#fafafa;">
-      ${escapeHtml(data.copyPaste)}
-    </div>`);
-  }
-
-  if (data.expiresAt) {
-    bodyParts.push(`<p style="color:#a1a1aa;font-size:13px;">Expira em <strong>${formatDateTime(data.expiresAt)}</strong>.</p>`);
-  }
-
   return {
     subject: isPix
       ? `PIX gerado — Pedido #${data.orderId}`
       : `Finalize o pagamento — Pedido #${data.orderId}`,
     html: layout({
-      storeName: data.storeName,
+      ...sharedLayoutFields(data, {
+        copyPaste: isPix ? data.copyPaste : '',
+        paymentExpiresLabel: data.expiresAt ? formatDateTime(data.expiresAt) : '',
+      }),
       title: isPix ? 'PIX gerado' : 'Pagamento pendente',
       subtitle: `Pedido #${data.orderId}`,
-      bodyHtml: bodyParts.join(''),
+      bodyHtml: '',
       ctaLabel: isPix ? 'Ver QR Code / PIX' : 'Pagar com cartão',
       ctaUrl: data.paymentUrl,
-      footerNote: data.storeName,
+      customBodyHtml: resolveBodyTemplate(data, 'paymentPending'),
     }),
   };
 }
 
 function paymentConfirmedEmail(data) {
-  const bodyHtml = [
-    renderOrderSummary(data),
-    '<p>Pagamento <strong style="color:#22c55e;">aprovado</strong>! Seu pedido está sendo processado.</p>',
-    '<p>Acesse sua conta para acompanhar a entrega e falar com o suporte pelo chat do pedido.</p>',
-  ].join('');
-
   return {
     subject: `Pagamento aprovado — Pedido #${data.orderId}`,
     html: layout({
-      storeName: data.storeName,
+      ...sharedLayoutFields(data),
       title: 'Pagamento aprovado',
       subtitle: 'Obrigado pela compra!',
-      bodyHtml,
+      bodyHtml: '',
       ctaLabel: 'Ver meu pedido',
       ctaUrl: data.orderUrl,
-      footerNote: data.storeName,
+      customBodyHtml: resolveBodyTemplate(data, 'paymentConfirmed'),
     }),
   };
 }
 
 function orderDeliveredEmail(data) {
   const reviewUrl = data.reviewUrl || data.orderUrl;
-  const bodyHtml = [
-    renderOrderSummary(data),
-    '<p>Seu pedido foi <strong style="color:#22c55e;">entregue com sucesso</strong>.</p>',
-    '<p>Acesse o chat do pedido para ver os detalhes da entrega e as instruções de uso.</p>',
-    '<p>Conte como foi sua experiência — sua avaliação ajuda outros clientes e melhora nosso atendimento.</p>',
-  ].join('');
-
   return {
     subject: `Pedido entregue — #${data.orderId}`,
     html: layout({
-      storeName: data.storeName,
+      ...sharedLayoutFields(data),
       title: 'Pedido entregue',
       subtitle: 'Aproveite sua compra!',
-      bodyHtml,
+      bodyHtml: '',
       ctaLabel: data.includeReviewCta ? 'Avaliar minha compra' : 'Abrir pedido',
       ctaUrl: data.includeReviewCta ? reviewUrl : data.orderUrl,
-      footerNote: data.storeName,
+      customBodyHtml: resolveBodyTemplate(data, 'orderDelivered'),
     }),
   };
 }
 
 function reviewInviteEmail(data) {
-  const bodyHtml = [
-    `<p>Olá, <strong>${escapeHtml(data.customerName)}</strong>!</p>`,
-    `<p>Seu pedido <strong>#${escapeHtml(data.orderId)}</strong> já foi entregue.</p>`,
-    '<p>Que tal avaliar sua experiência? Leva menos de um minuto e nos ajuda a melhorar cada vez mais.</p>',
-  ].join('');
-
   return {
     subject: `Como foi sua compra? — #${data.orderId}`,
     html: layout({
-      storeName: data.storeName,
+      ...sharedLayoutFields(data),
       title: 'Avalie sua compra',
       subtitle: 'Sua opinião é muito importante',
-      bodyHtml,
+      bodyHtml: '',
       ctaLabel: 'Deixar avaliação',
       ctaUrl: data.reviewUrl,
-      footerNote: data.storeName,
+      customBodyHtml: resolveBodyTemplate(data, 'reviewInvite'),
     }),
   };
 }
 
 function orderCancelledEmail(data) {
   const reason = data.reason || 'Pedido cancelado';
-  const bodyHtml = [
-    `<p>Olá, <strong>${escapeHtml(data.customerName)}</strong>!</p>`,
-    `<p>Seu pedido <strong>#${escapeHtml(data.orderId)}</strong> foi cancelado.</p>`,
-    `<p style="color:#a1a1aa;">Motivo: ${escapeHtml(reason)}</p>`,
-    data.expired
-      ? '<p>Se ainda quiser comprar, você pode refazer o pedido na loja. Os produtos podem ter saído do estoque.</p>'
-      : '<p>Se tiver dúvidas, entre em contato com o suporte.</p>',
-  ].join('');
-
   return {
     subject: `Pedido cancelado — #${data.orderId}`,
     html: layout({
-      storeName: data.storeName,
+      ...sharedLayoutFields(data, { reason }),
       title: 'Pedido cancelado',
       subtitle: reason,
-      bodyHtml,
+      bodyHtml: '',
       ctaLabel: 'Voltar à loja',
       ctaUrl: data.storeUrl,
-      footerNote: data.storeName,
+      customBodyHtml: resolveBodyTemplate(data, 'orderCancelled'),
     }),
   };
 }
 
 function abandonedCartRecoveryEmail(data) {
-  const bodyHtml = [
-    `<p>Olá, <strong>${escapeHtml(data.customerName)}</strong>!</p>`,
-    '<p>Você deixou produtos no carrinho e eles ainda estão te esperando.</p>',
-    renderOrderItems(data.items),
-    `<p style="font-size:16px;margin-top:8px;">Subtotal: <strong style="color:#06b6d4;">${formatBrl(data.subtotal)}</strong></p>`,
-    data.couponCode
-      ? `<p style="color:#a1a1aa;font-size:13px;">Cupom salvo: <strong>${escapeHtml(data.couponCode)}</strong></p>`
-      : '',
-    '<p>Finalize sua compra agora antes que o estoque acabe.</p>',
-  ].join('');
+  const pixel = data.openPixelUrl
+    ? `<img src="${escapeHtml(data.openPixelUrl)}" width="1" height="1" alt="" style="display:none;" />`
+    : '';
+  const bodyTemplate = resolveBodyTemplate(data, 'abandonedCartRecovery');
 
   return {
     subject: `Seu carrinho está esperando — ${data.storeName}`,
     html: layout({
-      storeName: data.storeName,
-      title: 'Você esqueceu algo?',
-      subtitle: 'Seus produtos ainda estão no carrinho',
-      bodyHtml,
-      ctaLabel: 'Retomar compra',
+      ...sharedLayoutFields(data, {
+        itemsHtml: renderOrderItems(data.items),
+        totalLabel: data.subtotal != null ? formatBrl(data.subtotal) : '',
+        couponCode: data.couponCode || '',
+      }),
+      title: 'Seu carrinho está te esperando!',
+      subtitle: 'Não deixe sua compra escapar',
+      bodyHtml: pixel,
+      ctaLabel: 'Finalizar Compra Agora',
       ctaUrl: data.checkoutUrl,
-      footerNote: data.storeName,
+      customBodyHtml: bodyTemplate ? `${pixel}${bodyTemplate}` : null,
     }),
   };
 }
@@ -289,6 +298,8 @@ module.exports = {
   escapeHtml,
   formatBrl,
   formatDateTime,
+  layout,
+  withEmailLayout,
   orderCreatedEmail,
   paymentPendingEmail,
   paymentConfirmedEmail,

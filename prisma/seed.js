@@ -101,7 +101,7 @@ async function main() {
     },
     create: {
       name: 'Moderador',
-      description: 'Acesso limitado para gerenciar pedidos, chat e visualizar produtos',
+      description: 'Acesso limitado para gerenciar pedidos, chat, visualizar produtos e marketing',
       permissions: {
         connect: MODERATOR_ROLE_PERMISSIONS.map((key) => ({ key })),
       },

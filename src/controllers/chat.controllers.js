@@ -12,6 +12,7 @@ const { userHasPermission } = require('../middleware/permissionMiddleware');
 const { claimOneCodeForDelivery } = require('../services/orderFulfillment.service');
 const { finalizeOrderDelivery, emitDeliverySideEffects } = require('../services/orderDelivery.service');
 const orderEmailService = require('../services/orderEmail.service');
+const { listClientsPaginated } = require('../services/clientList.service');
 const {
   recordAdminAction,
   AUDIT_ACTIONS,
@@ -1033,82 +1034,8 @@ class ChatController {
   async listClients(req, res) {
     try {
       if (!req.user.isAdmin) return res.status(403).json({ error: 'Acesso negado' });
-      const { search, page = 1 } = req.query;
-      const pageSize = 20;
-      const skip = (Number(page) - 1) * pageSize;
-
-      const where = {};
-      if (search) {
-        where.OR = [
-          { name: { contains: search, mode: 'insensitive' } },
-          { email: { contains: search, mode: 'insensitive' } },
-        ];
-      }
-
-      const [users, total] = await Promise.all([
-        prisma.user.findMany({
-          where,
-          select: {
-            id: true,
-            name: true,
-            email: true,
-            image: true,
-            createdAt: true,
-            lastAccessAt: true,
-            isAdmin: true,
-            roleId: true,
-            role: { select: { id: true, name: true } },
-            orders: {
-              where: { status: { in: ['PAID', 'DELIVERED'] } },
-              select: { id: true, total: true, status: true, createdAt: true },
-              orderBy: { createdAt: 'desc' },
-              take: 5,
-            },
-          },
-          orderBy: { createdAt: 'desc' },
-          skip,
-          take: pageSize,
-        }),
-        prisma.user.count({ where }),
-      ]);
-
-      const clients = await Promise.all(
-        users.map(async (u) => {
-          const [stats, itemsStats, discountStats] = await Promise.all([
-            prisma.order.aggregate({
-              where: { userId: u.id, status: { in: ['PAID', 'DELIVERED'] } },
-              _sum: { total: true },
-              _count: { id: true },
-            }),
-            prisma.orderItem.aggregate({
-              where: { order: { userId: u.id, status: { in: ['PAID', 'DELIVERED'] } } },
-              _sum: { quantity: true },
-            }),
-            prisma.order.aggregate({
-              where: { userId: u.id, status: { in: ['PAID', 'DELIVERED'] } },
-              _sum: { discount: true },
-            }),
-          ]);
-          return {
-            id: u.id,
-            name: u.name,
-            email: u.email,
-            image: u.image,
-            createdAt: u.createdAt,
-            lastAccessAt: u.lastAccessAt,
-            isAdmin: u.isAdmin,
-            roleId: u.roleId,
-            role: u.role,
-            recentOrders: u.orders,
-            ordersCount: stats._count.id,
-            totalSpent: stats._sum.total || 0,
-            totalItemsCount: itemsStats._sum.quantity || 0,
-            totalDiscounts: discountStats._sum.discount || 0,
-          };
-        })
-      );
-
-      return res.json({ clients, total, page: Number(page), totalPages: Math.ceil(total / pageSize) });
+      const result = await listClientsPaginated(req.query);
+      return res.json(result);
     } catch (err) {
       console.error('[ChatController.listClients]', err);
       return res.status(500).json({ error: 'Erro ao listar clientes' });

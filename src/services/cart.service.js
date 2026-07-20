@@ -252,7 +252,7 @@ async function syncCart({
   return { synced: true, cartId: cart.id, subtotalCents: cart.subtotalCents };
 }
 
-async function captureEmail({ userId, visitorId, email, customerName, userEmail, userName }) {
+async function captureEmail({ userId, visitorId, email, customerName, phone, document, userEmail, userName }) {
   const resolvedEmail = normalizeEmail(email) || normalizeEmail(userEmail);
   if (!resolvedEmail) {
     const err = new Error('E-mail inválido');
@@ -267,6 +267,8 @@ async function captureEmail({ userId, visitorId, email, customerName, userEmail,
   }
 
   const resolvedName = String(customerName || userName || '').trim() || null;
+  const resolvedPhone = String(phone || '').replace(/\D/g, '') || null;
+  const resolvedDocument = String(document || '').replace(/\D/g, '') || null;
 
   const cart = await findCartByIdentity(prisma, { userId, visitorId });
   if (!cart) {
@@ -278,6 +280,8 @@ async function captureEmail({ userId, visitorId, email, customerName, userEmail,
     data: {
       email: resolvedEmail,
       ...(resolvedName ? { customerName: resolvedName } : {}),
+      ...(resolvedPhone ? { phone: resolvedPhone } : {}),
+      ...(resolvedDocument ? { document: resolvedDocument } : {}),
       lastActivityAt: new Date(),
     },
   });
@@ -305,12 +309,19 @@ async function markConverted({ userId, visitorId }) {
   return { converted: result.count };
 }
 
-async function listRecoverableCartIds({ delayHours, minSubtotalCents, limit = 50 }) {
-  const cutoff = new Date(Date.now() - delayHours * 60 * 60 * 1000);
+async function listRecoverableCartIds({ delayHours, inactivityMinutes, minSubtotalCents, limit = 50 }) {
+  const emailCutoff = new Date(Date.now() - delayHours * 60 * 60 * 1000);
+  const inactivityCutoff =
+    inactivityMinutes && inactivityMinutes > 0
+      ? new Date(Date.now() - inactivityMinutes * 60 * 1000)
+      : emailCutoff;
+  // E-mail só depois do delay; e nunca antes de estar "abandonado" na listagem
+  const cutoff = emailCutoff < inactivityCutoff ? emailCutoff : inactivityCutoff;
 
   const carts = await prisma.abandonedCart.findMany({
     where: {
       convertedAt: null,
+      archivedAt: null,
       recoveryEmailSentAt: null,
       email: { not: null },
       subtotalCents: { gte: minSubtotalCents },

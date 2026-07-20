@@ -21,6 +21,8 @@ model User {
   mfaSecret    String?
   mfaEnabled   Boolean       @default(false)
   isAdmin      Boolean       @default(false)
+  phone        String?
+  document     String?
   lastAccessAt DateTime?
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
@@ -35,6 +37,8 @@ model User {
   assignedChats Chat[]       @relation("ChatAssignee")
 
   @@index([roleId])
+  @@index([document])
+  @@index([phone])
 }
 
 model Category {
@@ -157,34 +161,39 @@ model ProductCode {
 }
 
 model Order {
-  id               String       @id
-  userId           String
-  status           String       @default("PENDING")
-  total            Int
-  idempotencyKey   String?      @unique
-  createdAt        DateTime     @default(now())
-  updatedAt        DateTime     @updatedAt
-  paidAt           DateTime?
-  deliveredAt      DateTime?
-  adminNotes       String?
-  discount         Int          @default(0)
-  paymentExpiresAt DateTime?
-  subtotal         Int          @default(0)
-  paymentMethod    String?
-  couponCode       String?
-  checkoutData     Json?
-  deliveryOption   String?      @default("standard")
-  deliveryFee      Int          @default(0)
-  clientIp         String?
-  userAgent        String?
-  chat             Chat?
-  couponUsage      CouponUsage?
-  user             User         @relation(fields: [userId], references: [id])
-  items            OrderItem[]
-  payments         Payment[]
+  id                  String         @id
+  userId              String
+  status              String         @default("PENDING")
+  total               Int
+  idempotencyKey      String?        @unique
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+  paidAt              DateTime?
+  deliveredAt         DateTime?
+  adminNotes          String?
+  discount            Int            @default(0)
+  paymentExpiresAt    DateTime?
+  subtotal            Int            @default(0)
+  paymentMethod       String?
+  couponCode          String?
+  checkoutData        Json?
+  deliveryOption      String?        @default("standard")
+  deliveryFee         Int            @default(0)
+  clientIp            String?
+  userAgent           String?
+  recoveredFromCartId String?
+  recoverySource      String?
+  chat                Chat?
+  couponUsage         CouponUsage?
+  user                User           @relation(fields: [userId], references: [id])
+  recoveredFromCart   AbandonedCart? @relation("OrderRecoveredFromCart", fields: [recoveredFromCartId], references: [id], onDelete: SetNull)
+  items               OrderItem[]
+  payments            Payment[]
 
   @@index([userId, createdAt])
   @@index([status])
+  @@index([recoveredFromCartId])
+  @@index([recoverySource, paidAt])
 }
 
 model OrderItem {
@@ -289,6 +298,7 @@ model SiteConfig {
   pluginsConfig               Json?
   reviewsSettings             Json?
   abandonedCartSettings       Json?
+  emailTemplates              Json?
 }
 
 model InstitutionalPage {
@@ -387,20 +397,32 @@ model AbandonedCart {
   userId              String?             @unique
   visitorId           String?             @unique
   email               String?
+  phone               String?
   customerName        String?
+  document            String?
   couponCode          String?
   subtotalCents       Int                 @default(0)
   lastActivityAt      DateTime            @default(now())
+  recoveryToken       String?             @unique
   recoveryEmailSentAt DateTime?
+  emailOpenedAt       DateTime?
+  emailClickedAt      DateTime?
   convertedAt         DateTime?
+  recoveredAt         DateTime?
+  convertedOrderId    String?             @unique
+  archivedAt          DateTime?
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
   user                User?               @relation(fields: [userId], references: [id], onDelete: Cascade)
   items               AbandonedCartItem[]
+  recoveredOrders     Order[]             @relation("OrderRecoveredFromCart")
 
   @@index([email, lastActivityAt])
   @@index([recoveryEmailSentAt, lastActivityAt, convertedAt])
   @@index([convertedAt])
+  @@index([archivedAt, lastActivityAt])
+  @@index([phone])
+  @@index([emailClickedAt])
 }
 
 model AbandonedCartItem {

@@ -45,12 +45,16 @@ class CartController {
       const visitorId = sanitizeString(req.body?.visitorId || '', 80) || null;
       const email = sanitizeString(req.body?.email || '', 160) || null;
       const customerName = sanitizeString(req.body?.customerName || '', 120) || null;
+      const phone = sanitizeString(req.body?.phone || '', 32) || null;
+      const document = sanitizeString(req.body?.document || req.body?.cpf || '', 32) || null;
 
       const result = await cartService.captureEmail({
         userId,
         visitorId,
         email,
         customerName,
+        phone,
+        document,
         userEmail: req.user?.email,
         userName: req.user?.name,
       });

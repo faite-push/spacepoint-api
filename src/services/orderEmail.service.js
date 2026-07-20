@@ -8,7 +8,9 @@ const {
   orderDeliveredEmail,
   reviewInviteEmail,
   orderCancelledEmail,
+  withEmailLayout,
 } = require('../utils/emailTemplates');
+const { getEmailTemplates } = require('../utils/emailTemplatesSettings');
 
 const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
 
@@ -39,11 +41,17 @@ function buildStoreUrl() {
 }
 
 async function loadSiteBranding() {
-  const site = await prisma.siteConfig.findUnique({
-    where: { id: 'default' },
-    select: { storeName: true },
-  });
-  return site?.storeName?.trim() || 'Space Point';
+  const { templates, branding } = await getEmailTemplates(prisma);
+  return {
+    storeName: branding.storeName,
+    logoUrl: branding.logoUrl,
+    logoWhiteUrl: branding.logoWhiteUrl,
+    storeUrl: branding.storeUrl,
+    contactEmail: branding.contactEmail,
+    headerHtml: templates.headerHtml,
+    footerHtml: templates.footerHtml,
+    customBodies: templates.bodies,
+  };
 }
 
 async function loadOrderContext(orderId) {
@@ -63,7 +71,7 @@ async function loadOrderContext(orderId) {
   if (!order) return null;
 
   const customer = resolveCustomerFromOrder(order);
-  const storeName = await loadSiteBranding();
+  const branding = await loadSiteBranding();
 
   const items = order.items.map((item) => ({
     label: item.variant?.name
@@ -75,9 +83,13 @@ async function loadOrderContext(orderId) {
     unitPrice: item.unitPrice,
   }));
 
-  return {
+  return withEmailLayout({
     order,
-    storeName,
+    storeName: branding.storeName,
+    logoUrl: branding.logoUrl,
+    logoWhiteUrl: branding.logoWhiteUrl,
+    contactEmail: branding.contactEmail,
+    customBodies: branding.customBodies,
     customerName: customer.customerName,
     customerEmail: customer.customerEmail,
     items,
@@ -89,12 +101,29 @@ async function loadOrderContext(orderId) {
     orderId: order.id,
     paymentUrl: buildPaymentUrl(order.id),
     orderUrl: buildOrderUrl(order.id),
-    storeUrl: buildStoreUrl(),
-  };
+    reviewUrl: buildReviewUrl(order.id),
+    storeUrl: branding.storeUrl || buildStoreUrl(),
+  }, {
+    headerHtml: branding.headerHtml,
+    footerHtml: branding.footerHtml,
+    bodies: branding.customBodies,
+  });
 }
 
 function isValidEmail(email) {
   return typeof email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function layoutFields(ctx) {
+  return {
+    headerHtml: ctx.headerHtml,
+    footerHtml: ctx.footerHtml,
+    logoUrl: ctx.logoUrl,
+    logoWhiteUrl: ctx.logoWhiteUrl,
+    storeUrl: ctx.storeUrl,
+    contactEmail: ctx.contactEmail,
+    customBodies: ctx.customBodies,
+  };
 }
 
 async function sendToCustomer(email, subject, html) {
@@ -120,6 +149,7 @@ function notifyOrderCreated(orderId) {
       deliveryFee: ctx.deliveryFee,
       paymentExpiresAt: ctx.paymentExpiresAt,
       paymentUrl: ctx.paymentUrl,
+      ...layoutFields(ctx),
     });
 
     await sendToCustomer(ctx.customerEmail, template.subject, template.html);
@@ -157,6 +187,7 @@ function notifyPaymentPending(orderId, paymentMeta = {}) {
       copyPaste: paymentMeta.copyPaste || metadata.copyPaste || null,
       expiresAt: paymentMeta.expiresAt || metadata.expiresAt || ctx.paymentExpiresAt,
       paymentUrl: ctx.paymentUrl,
+      ...layoutFields(ctx),
     });
 
     const sent = await sendToCustomer(ctx.customerEmail, template.subject, template.html);
@@ -201,6 +232,7 @@ function notifyPaymentConfirmed(orderId) {
       discount: ctx.discount,
       deliveryFee: ctx.deliveryFee,
       orderUrl: ctx.orderUrl,
+      ...layoutFields(ctx),
     });
 
     const sent = await sendToCustomer(ctx.customerEmail, template.subject, template.html);
@@ -244,6 +276,7 @@ function notifyOrderDelivered(orderId) {
       orderUrl: ctx.orderUrl,
       reviewUrl: buildReviewUrl(ctx.orderId),
       includeReviewCta: !chat?.rating,
+      ...layoutFields(ctx),
     });
 
     const sent = await sendToCustomer(ctx.customerEmail, template.subject, template.html);
@@ -273,6 +306,7 @@ function notifyReviewInvite(orderId) {
       customerName: ctx.customerName,
       orderId: ctx.orderId,
       reviewUrl: buildReviewUrl(ctx.orderId),
+      ...layoutFields(ctx),
     });
 
     const sent = await sendToCustomer(ctx.customerEmail, template.subject, template.html);
@@ -302,6 +336,7 @@ function notifyReviewReminder(orderId) {
       customerName: ctx.customerName,
       orderId: ctx.orderId,
       reviewUrl: buildReviewUrl(ctx.orderId),
+      ...layoutFields(ctx),
     });
 
     const sent = await sendToCustomer(ctx.customerEmail, template.subject, template.html);
@@ -326,6 +361,7 @@ function notifyOrderCancelled(orderId, { reason = 'Pedido cancelado', expired = 
       reason,
       expired,
       storeUrl: ctx.storeUrl,
+      ...layoutFields(ctx),
     });
 
     await sendToCustomer(ctx.customerEmail, template.subject, template.html);

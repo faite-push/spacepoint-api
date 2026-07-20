@@ -5,6 +5,7 @@ const { validateCouponForOrder, recordCouponUsage } = require('../services/coupo
 const {
   normalizeCheckoutSettings,
   validateCheckoutData,
+  syncUserProfileFromCheckout,
 } = require('../utils/checkoutConfig');
 const { getRequiredFieldsForCheckout } = require('../config/gatewayCapabilities');
 const {
@@ -24,6 +25,7 @@ const {
 } = require('../services/payment.service');
 const { processOrderRefund } = require('../services/refund.service');
 const cartService = require('../services/cart.service');
+const marketingAutomations = require('../services/marketingAutomations.service');
 
 function buildItemsPreview(items, totalCount) {
   if (!items?.length) {
@@ -73,6 +75,8 @@ class OrderController {
       const couponCode = sanitizeString(req.body.couponCode || '', 64) || null;
       const paymentMethod = String(req.body.paymentMethod || 'PIX').trim().toUpperCase();
       const deliveryOption = String(req.body.deliveryOption || 'standard').trim().toLowerCase();
+      const recoveryToken = sanitizeString(req.body.recoveryToken || '', 128) || null;
+      const recoverySource = sanitizeString(req.body.recoverySource || '', 32) || null;
 
       if (!items.length || items.length > 20) {
         return res.status(400).json({ error: 'Carrinho inválido' });
@@ -180,6 +184,14 @@ class OrderController {
             ? '[ENTREGA EXPRESSA] Priorizar atendimento e entrega deste pedido.'
             : null;
 
+        const recoveryAttribution = recoveryToken
+          ? await marketingAutomations.resolveRecoveryAttribution({
+              recoveryToken,
+              recoverySource,
+              tx,
+            })
+          : null;
+
         const created = await tx.order.create({
           data: {
             userId,
@@ -196,10 +208,27 @@ class OrderController {
             adminNotes,
             clientIp: req.ip || req.headers['x-forwarded-for']?.split(',')[0]?.trim() || null,
             userAgent: sanitizeString(req.headers['user-agent'] || '', 512) || null,
+            ...(recoveryAttribution
+              ? {
+                  recoveredFromCartId: recoveryAttribution.recoveredFromCartId,
+                  recoverySource: recoveryAttribution.recoverySource,
+                }
+              : {}),
             items: { create: orderItemsData },
           },
           include: { items: true },
         });
+
+        if (recoveryAttribution) {
+          await tx.abandonedCart.update({
+            where: { id: recoveryAttribution.recoveredFromCartId },
+            data: {
+              convertedAt: new Date(),
+              recoveredAt: new Date(),
+              convertedOrderId: created.id,
+            },
+          });
+        }
 
         for (const { item, sellable } of sellables) {
           const orderItem = created.items.find(
@@ -220,11 +249,15 @@ class OrderController {
           });
         }
 
+        await syncUserProfileFromCheckout(tx, userId, req.body.checkoutData);
+
         return created;
       });
 
       orderEmailService.notifyOrderCreated(order.id);
-      cartService.markConverted({ userId }).catch(() => {});
+      if (!recoveryToken) {
+        cartService.markConverted({ userId }).catch(() => {});
+      }
 
       return res.status(201).json({ order });
     } catch (err) {
