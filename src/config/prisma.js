@@ -1,3 +1,6 @@
+// TLS SquareCloud / DATABASE_URL com certificado — antes do PrismaClient
+require('./databaseSsl');
+
 const { PrismaClient } = require('@prisma/client');
 const {
   generateNumericId,

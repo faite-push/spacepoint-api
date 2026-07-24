@@ -6,8 +6,14 @@ node_modules/
 .env.*
 !.env.example
 
-# Certificados e chaves privadas
+# Certificados e chaves privadas (SquareCloud / TLS)
 src/certs/
+certs/
+certificate.pem
+client.p12
+*.p12
+*.pem
+!*.pem.example
 
 # Uploads de usuários (não devem ir ao repositório)
 uploads/

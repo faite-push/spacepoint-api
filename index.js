@@ -11,6 +11,8 @@ const app = express();
 app.set('trust proxy', 1);
 
 require("dotenv").config();
+// Materializa certificado SquareCloud e ajusta DATABASE_URL antes de qualquer Prisma
+require("./src/config/databaseSsl");
 
 process.on("uncaughtException", (err) => {
   console.error("[ERRO DETECTADO]: " + err.message);

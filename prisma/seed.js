@@ -1,3 +1,4 @@
+require('../src/config/databaseSsl');
 const { PrismaClient } = require('@prisma/client');
 const { ALL_PERMISSIONS, ADMIN_ROLE_PERMISSIONS, MODERATOR_ROLE_PERMISSIONS, } = require('../src/config/permissions');
 

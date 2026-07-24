@@ -1,4 +1,4 @@
-const { PrismaClient } = require('@prisma/client');
+const { prisma } = require('../config/prisma');
 const { validateGatewayCredentials } = require('../services/gatewayValidation.service');
 const {
   getSupportedMethods,
@@ -16,8 +16,6 @@ const {
   redactGatewayConfigForClient,
   unlockGatewayConfig,
 } = require('../utils/gatewaySecrets');
-
-const prisma = new PrismaClient();
 
 function hasSharedWebhookEnv() {
   return Boolean(String(process.env.WEBHOOK_SHARED_SECRET || '').trim());
