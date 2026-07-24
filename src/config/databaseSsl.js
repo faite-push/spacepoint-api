@@ -42,6 +42,28 @@ function decodeCertContent() {
   return null;
 }
 
+function splitPemBundles(pemContent, outDir) {
+  ensureDir(outDir);
+  const keyMatch = pemContent.match(/-----BEGIN ([A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----)/);
+  const certMatches = [...pemContent.matchAll(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g)];
+
+  const keyPath = path.join(outDir, 'client.key');
+  const certPath = path.join(outDir, 'client.crt');
+
+  if (keyMatch) {
+    fs.writeFileSync(keyPath, `${keyMatch[0].trim()}\n`, 'utf8');
+  }
+  if (certMatches.length) {
+    // Primeiro cert = client; se houver mais, o último costuma ser CA — grava todos no .crt
+    fs.writeFileSync(certPath, `${certMatches.map((m) => m[0].trim()).join('\n')}\n`, 'utf8');
+  }
+
+  return {
+    keyPath: fs.existsSync(keyPath) ? keyPath : null,
+    certPath: fs.existsSync(certPath) ? certPath : null,
+  };
+}
+
 function resolvePemPath() {
   const fromEnv = process.env.DATABASE_SSL_CERT_PATH;
   if (fromEnv && fs.existsSync(fromEnv)) return path.resolve(fromEnv);
@@ -55,7 +77,6 @@ function resolvePemPath() {
 
   if (fs.existsSync(DEFAULT_PEM_PATH)) return DEFAULT_PEM_PATH;
 
-  // Raiz do projeto (útil no zip da Square)
   const rootPem = path.join(process.cwd(), 'certificate.pem');
   if (fs.existsSync(rootPem)) return rootPem;
 
@@ -101,7 +122,7 @@ function applyDatabaseSsl() {
     return { url: baseUrl, mode: baseUrl.includes('sslidentity=') ? 'p12' : 'pem' };
   }
 
-  const sslMode = process.env.DATABASE_SSL_MODE || 'verify-ca';
+  const sslMode = process.env.DATABASE_SSL_MODE || 'require';
   const p12Path = resolveP12Path();
 
   if (p12Path) {
@@ -117,14 +138,23 @@ function applyDatabaseSsl() {
 
   const pemPath = resolvePemPath();
   if (pemPath) {
-    const cert = pathForUrl(pemPath);
-    // SquareCloud: o mesmo .pem serve como key, cert e CA
-    const url = appendQueryParams(baseUrl, {
+    const pemContent = fs.readFileSync(pemPath, 'utf8');
+    const { keyPath, certPath } = splitPemBundles(pemContent, CERTS_DIR);
+
+    // Arquivos separados evitam erro ASN1 no Prisma/Windows ao reusar o mesmo .pem
+    const key = pathForUrl(keyPath || pemPath);
+    const cert = pathForUrl(certPath || pemPath);
+    const params = {
       sslmode: sslMode,
       sslcert: cert,
-      sslkey: cert,
-      sslrootcert: cert,
-    });
+      sslkey: key,
+    };
+    // verify-ca / verify-full precisam de CA; com bundle único use o cert
+    if (sslMode === 'verify-ca' || sslMode === 'verify-full') {
+      params.sslrootcert = cert;
+    }
+
+    const url = appendQueryParams(baseUrl, params);
     process.env.DATABASE_URL = url;
     return { url, mode: 'pem' };
   }
