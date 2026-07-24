@@ -37,24 +37,88 @@ function resolveOAuthRedirect(req, res) {
   return path ? `${base}${path}` : base || '/';
 }
 
+/**
+ * Login OAuth: encontra por providerId, senão vincula conta existente pelo e-mail,
+ * senão cria. Evita Unique constraint em `email` quando o usuário já existe
+ * (Discord, OTP, seed, etc.) sem o googleId/discordId atual.
+ */
 const upsertUser = async ({ provider, providerId, name, email, image }) => {
-  const where = provider === 'discord'
-    ? { discordId: providerId }
-    : { googleId: providerId };
+  const providerField = provider === 'discord' ? 'discordId' : 'googleId';
+  const normalizedEmail = email ? String(email).trim().toLowerCase() : null;
 
-  const data = {
+  const linkData = {
     name,
-    email: email || null,
     image,
     provider,
-    ...(provider === 'discord' ? { discordId: providerId } : { googleId: providerId }),
+    [providerField]: providerId,
+    ...(normalizedEmail ? { email: normalizedEmail } : {}),
   };
 
-  return prisma.user.upsert({
-    where,
-    update: { name, image },
-    create: { id: crypto.randomUUID(), ...data },
+  const byProvider = await prisma.user.findUnique({
+    where: { [providerField]: providerId },
   });
+  if (byProvider) {
+    return prisma.user.update({
+      where: { id: byProvider.id },
+      data: {
+        name: name || byProvider.name,
+        image: image || byProvider.image,
+        ...(normalizedEmail && !byProvider.email ? { email: normalizedEmail } : {}),
+      },
+    });
+  }
+
+  if (normalizedEmail) {
+    const byEmail = await prisma.user.findUnique({
+      where: { email: normalizedEmail },
+    });
+    if (byEmail) {
+      // Conta já existe (outro provider / OTP) — vincula este OAuth
+      return prisma.user.update({
+        where: { id: byEmail.id },
+        data: {
+          name: name || byEmail.name,
+          image: image || byEmail.image,
+          [providerField]: providerId,
+          // Mantém provider original se já tinha; senão grava o atual
+          ...(byEmail[providerField] ? {} : { provider }),
+        },
+      });
+    }
+  }
+
+  try {
+    return await prisma.user.create({
+      data: {
+        id: crypto.randomUUID(),
+        name,
+        email: normalizedEmail,
+        image,
+        provider,
+        [providerField]: providerId,
+      },
+    });
+  } catch (err) {
+    // Corrida rara: outro request criou o mesmo e-mail/provider entre o find e o create
+    if (err?.code === 'P2002') {
+      if (normalizedEmail) {
+        const existing = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+        if (existing) {
+          return prisma.user.update({
+            where: { id: existing.id },
+            data: {
+              name: name || existing.name,
+              image: image || existing.image,
+              [providerField]: providerId,
+            },
+          });
+        }
+      }
+      const again = await prisma.user.findUnique({ where: { [providerField]: providerId } });
+      if (again) return again;
+    }
+    throw err;
+  }
 };
 
 class AuthController {
