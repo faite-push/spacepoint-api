@@ -5,7 +5,7 @@ const DEFAULT_REVIEWS_SETTINGS = {
   homeSubtitle: 'Experiências reais de quem já confiou na nossa loja',
   autoPublish: false,
   allowScreenshots: false,
-  autoCloseChatOnDelivery: true,
+  autoCloseChatOnDelivery: false,
   sendReviewInviteEmail: true,
   reviewReminderHours: 24,
   opinionTags: ['Muito bom', 'Entrega rápida', 'Confiável', 'Voltarei a comprar', 'Ótimo suporte'],
@@ -29,7 +29,7 @@ function normalizeReviewsSettings(raw) {
         : DEFAULT_REVIEWS_SETTINGS.homeSubtitle,
     autoPublish: raw.autoPublish === true,
     allowScreenshots: raw.allowScreenshots === true,
-    autoCloseChatOnDelivery: raw.autoCloseChatOnDelivery !== false,
+    autoCloseChatOnDelivery: raw.autoCloseChatOnDelivery === true,
     sendReviewInviteEmail: raw.sendReviewInviteEmail !== false,
     reviewReminderHours:
       Number.isFinite(Number(raw.reviewReminderHours)) && Number(raw.reviewReminderHours) > 0

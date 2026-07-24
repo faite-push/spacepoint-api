@@ -11,8 +11,17 @@ const {
   AUDIT_ACTIONS,
   requestContext,
 } = require('../services/auditLog.service');
+const {
+  prepareGatewayConfigForStorage,
+  redactGatewayConfigForClient,
+  unlockGatewayConfig,
+} = require('../utils/gatewaySecrets');
 
 const prisma = new PrismaClient();
+
+function hasSharedWebhookEnv() {
+  return Boolean(String(process.env.WEBHOOK_SHARED_SECRET || '').trim());
+}
 
 function buildActiveMethodsFromLegacy(gateway) {
   const supported = getSupportedMethods(gateway.slug);
@@ -42,13 +51,40 @@ function mergeConfigWithActiveMethods(config, activeMethods) {
   };
 }
 
+function sanitizeGatewayResponse(gateway) {
+  if (!gateway) return gateway;
+  return {
+    ...gateway,
+    config: redactGatewayConfigForClient(gateway.config),
+  };
+}
+
+/** Mescla placeholder __STORED__ com cert do banco e descriptografa para validação. */
+function resolveConfigForValidation(slug, incomingConfig, existingConfig) {
+  const prepared = prepareGatewayConfigForStorage(incomingConfig, existingConfig || {});
+  return unlockGatewayConfig(prepared);
+}
+
+function assertWebhookSecretIfActivating(slug, config, isActive, activeMethods) {
+  const gatewaysWithWebhook = new Set(['efi-bank', 'pagbank', 'stripe', 'mercado-pago']);
+  if (!gatewaysWithWebhook.has(slug)) return null;
+
+  const activating = isActive || activeMethods?.PIX || activeMethods?.CARD;
+  if (!activating) return null;
+
+  if (!hasSharedWebhookEnv()) {
+    return 'Configure WEBHOOK_SHARED_SECRET no .env da API antes de ativar este gateway.';
+  }
+  return null;
+}
+
 class GatewayController {
   async list(req, res) {
     try {
       const gateways = await prisma.gatewayConfig.findMany({
         orderBy: { name: 'asc' },
       });
-      return res.json({ gateways });
+      return res.json({ gateways: gateways.map(sanitizeGatewayResponse) });
     } catch (err) {
       console.error('[Gateway.list]', err);
       return res.status(500).json({ error: 'Erro ao listar gateways' });
@@ -64,7 +100,10 @@ class GatewayController {
         return res.status(400).json({ error: 'Configuração inválida' });
       }
 
-      const result = await validateGatewayCredentials(slug, config);
+      const existing = await prisma.gatewayConfig.findUnique({ where: { slug } });
+      const unlocked = resolveConfigForValidation(slug, config, existing?.config);
+
+      const result = await validateGatewayCredentials(slug, unlocked);
       if (!result.valid) {
         return res.status(400).json({
           valid: false,
@@ -89,26 +128,30 @@ class GatewayController {
       const { slug } = req.params;
       const { name, config, isActive, skipValidation } = req.body;
 
+      const existing = await prisma.gatewayConfig.findUnique({ where: { slug } });
+      const storedConfig = config
+        ? prepareGatewayConfigForStorage(config, existing?.config || {})
+        : existing?.config;
+
       if (config && !skipValidation) {
-        const validation = await validateGatewayCredentials(slug, config);
+        const unlocked = unlockGatewayConfig(storedConfig);
+        const validation = await validateGatewayCredentials(slug, unlocked);
         if (!validation.valid) {
           return res.status(400).json({ error: validation.message });
         }
       }
 
-      const existing = await prisma.gatewayConfig.findUnique({ where: { slug } });
-
       const gateway = await prisma.gatewayConfig.upsert({
         where: { slug },
         update: {
           name,
-          config,
+          ...(storedConfig ? { config: storedConfig } : {}),
           ...(isActive !== undefined ? { isActive } : {}),
         },
         create: {
           slug,
           name,
-          config,
+          config: storedConfig || {},
           isActive: isActive ?? false,
         },
       });
@@ -126,7 +169,7 @@ class GatewayController {
         },
       });
 
-      return res.json(gateway);
+      return res.json(sanitizeGatewayResponse(gateway));
     } catch (err) {
       console.error('[Gateway.update]', err);
       return res.status(500).json({ error: 'Erro ao atualizar gateway' });
@@ -137,6 +180,14 @@ class GatewayController {
     try {
       const { slug } = req.params;
       const { isActive } = req.body;
+
+      if (isActive) {
+        const existing = await prisma.gatewayConfig.findUnique({ where: { slug } });
+        const secretErr = assertWebhookSecretIfActivating(slug, existing?.config, true, existing?.config?.activeMethods);
+        if (secretErr) {
+          return res.status(400).json({ error: secretErr });
+        }
+      }
 
       const gateway = await prisma.gatewayConfig.upsert({
         where: { slug },
@@ -161,7 +212,7 @@ class GatewayController {
         },
       });
 
-      return res.json(gateway);
+      return res.json(sanitizeGatewayResponse(gateway));
     } catch (err) {
       console.error('[Gateway.toggle]', err);
       return res.status(500).json({ error: 'Erro ao alternar status do gateway' });
@@ -185,6 +236,14 @@ class GatewayController {
       const existing = await prisma.gatewayConfig.findUnique({ where: { slug } });
       if (!existing) {
         return res.status(404).json({ error: 'Gateway não encontrado' });
+      }
+
+      if (enabled) {
+        const nextPreview = { ...buildActiveMethodsFromLegacy(existing), [method]: true };
+        const secretErr = assertWebhookSecretIfActivating(slug, existing.config, true, nextPreview);
+        if (secretErr) {
+          return res.status(400).json({ error: secretErr });
+        }
       }
 
       const currentActive = buildActiveMethodsFromLegacy(existing);
@@ -222,7 +281,7 @@ class GatewayController {
         },
       });
 
-      return res.json(updated);
+      return res.json(sanitizeGatewayResponse(updated));
     } catch (err) {
       console.error('[Gateway.toggleMethod]', err);
       return res.status(500).json({ error: 'Erro ao alternar método do gateway' });

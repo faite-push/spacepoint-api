@@ -42,6 +42,14 @@ router.post(
   MarketingAutomationsController.createOrderFromCart.bind(MarketingAutomationsController)
 );
 
+router.post(
+  '/v2/api/admin/marketing/automations/carts/:id/send-email',
+  ...admin,
+  csrf,
+  requirePermission('marketing:manage'),
+  MarketingAutomationsController.sendCartRecoveryEmail.bind(MarketingAutomationsController)
+);
+
 router.get(
   '/v2/api/admin/marketing/automations/orders',
   ...admin,

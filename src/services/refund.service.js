@@ -8,6 +8,7 @@ const {
 const { resolveEfiCertificate } = require('./gatewayValidation.service');
 const { reverseOrderInventoryOnRefund } = require('./orderFulfillment.service');
 const orderEmailService = require('./orderEmail.service');
+const { isGatewaySandbox } = require('../utils/gatewaySandbox');
 const {
   recordAdminAction,
   AUDIT_ACTIONS,
@@ -31,8 +32,10 @@ function normalizeSlug(slug) {
   return slug === 'efi-pix' ? 'efi-bank' : slug;
 }
 
+const { unlockGatewayConfig } = require('../utils/gatewaySecrets');
+
 function getConfig(gateway) {
-  return gateway?.config || {};
+  return unlockGatewayConfig(gateway?.config || {});
 }
 
 async function getPagBankToken(config) {
@@ -166,8 +169,9 @@ async function refundEfiPix(payment, gateway) {
   const efi = createEfiInstance({
     clientId: config.clientId || config.client_id,
     clientSecret: config.clientSecret || config.client_secret,
-    sandbox: config.sandbox !== false,
-    certificatePath: resolveEfiCertificate(config),
+    sandbox: isGatewaySandbox(config),
+    certificateBase64: config.certificateBase64,
+    certificatePath: config.certificateBase64 ? undefined : resolveEfiCertificate(config),
   });
 
   const detail = await efi.pixDetailCharge({ txid: payment.externalId });
@@ -233,11 +237,68 @@ async function processOrderRefund(orderId, { reason = '', skipGateway = false, r
   const payment = order.payments.find((p) => p.status === 'PAID');
   if (!payment) throw new Error('Nenhum pagamento pago encontrado para este pedido');
 
-  let gatewayResult = { skipped: true, reason: 'skip_gateway_requested' };
-  if (!skipGateway) {
-    gatewayResult = await refundAtGateway(payment);
+  const priorMeta = payment.metadata && typeof payment.metadata === 'object'
+    ? { ...payment.metadata }
+    : {};
+
+  // Fase 1: claim (marca refundPending no payment)
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT 1 FROM "Order" WHERE id = ${orderId} FOR UPDATE`;
+    const current = await tx.order.findUnique({ where: { id: orderId } });
+    if (!current || current.status === 'REFUNDED') {
+      throw new Error('Pedido já foi reembolsado');
+    }
+    if (priorMeta.refundPending && priorMeta.gatewayRefund && !skipGateway) {
+      return;
+    }
+    await tx.payment.update({
+      where: { id: payment.id },
+      data: {
+        metadata: {
+          ...priorMeta,
+          refundPending: true,
+          refundClaimedAt: new Date().toISOString(),
+          refundReason: reason || null,
+        },
+      },
+    });
+  });
+
+  // Fase 2: gateway (fora da transaction)
+  let gatewayResult = priorMeta.gatewayRefund || { skipped: true, reason: 'skip_gateway_requested' };
+  if (!skipGateway && !priorMeta.gatewayRefund) {
+    try {
+      gatewayResult = await refundAtGateway(payment);
+      await prisma.payment.update({
+        where: { id: payment.id },
+        data: {
+          metadata: {
+            ...priorMeta,
+            refundPending: true,
+            refundClaimedAt: priorMeta.refundClaimedAt || new Date().toISOString(),
+            refundReason: reason || null,
+            gatewayRefund: gatewayResult,
+            gatewayRefundAt: new Date().toISOString(),
+          },
+        },
+      });
+    } catch (err) {
+      await prisma.payment.update({
+        where: { id: payment.id },
+        data: {
+          metadata: {
+            ...priorMeta,
+            refundPending: false,
+            refundFailedAt: new Date().toISOString(),
+            refundError: err.message || 'Falha no estorno no gateway',
+          },
+        },
+      });
+      throw err;
+    }
   }
 
+  // Fase 3: inventário + status REFUNDED
   const updatedOrder = await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT 1 FROM "Order" WHERE id = ${orderId} FOR UPDATE`;
 
@@ -258,6 +319,8 @@ async function processOrderRefund(orderId, { reason = '', skipGateway = false, r
         status: 'REFUNDED',
         metadata: {
           ...paymentMeta,
+          ...priorMeta,
+          refundPending: false,
           refundedAt: new Date().toISOString(),
           refundReason: reason || null,
           gatewayRefund: gatewayResult,
@@ -286,9 +349,8 @@ async function processOrderRefund(orderId, { reason = '', skipGateway = false, r
     return orderUpdated;
   });
 
-  orderEmailService.notifyOrderCancelled(orderId, {
+  orderEmailService.notifyOrderRefunded(orderId, {
     reason: reason || 'Pedido reembolsado',
-    expired: false,
   });
 
   await recordAdminAction({

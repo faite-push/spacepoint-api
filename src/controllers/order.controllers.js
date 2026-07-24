@@ -1,7 +1,7 @@
 const { prisma } = require('../config/prisma');
 const { sanitizeString } = require('../utils/sanitize');
 const { resolveSellable } = require('../utils/productStore');
-const { validateCouponForOrder, recordCouponUsage } = require('../services/coupon.service');
+const { validateCouponForOrder } = require('../services/coupon.service');
 const {
   normalizeCheckoutSettings,
   validateCheckoutData,
@@ -74,6 +74,9 @@ class OrderController {
       const items = Array.isArray(req.body.items) ? req.body.items : [];
       const couponCode = sanitizeString(req.body.couponCode || '', 64) || null;
       const paymentMethod = String(req.body.paymentMethod || 'PIX').trim().toUpperCase();
+      if (!['PIX', 'CARD'].includes(paymentMethod)) {
+        return res.status(400).json({ error: 'Forma de pagamento inválida' });
+      }
       const deliveryOption = String(req.body.deliveryOption || 'standard').trim().toLowerCase();
       const recoveryToken = sanitizeString(req.body.recoveryToken || '', 128) || null;
       const recoverySource = sanitizeString(req.body.recoverySource || '', 32) || null;
@@ -112,12 +115,16 @@ class OrderController {
       }
 
       const normalizedItems = items
-        .map((item) => ({
-          productId: sanitizeString(item.productId, 80),
-          variantId: item.variantId ? sanitizeString(item.variantId, 80) : null,
-          quantity: Math.max(1, Math.min(10, Number(item.quantity || 1))),
-        }))
-        .filter((item) => item.productId);
+        .map((item) => {
+          const qty = Math.floor(Number(item.quantity));
+          if (!Number.isFinite(qty) || qty < 1) return null;
+          return {
+            productId: sanitizeString(item.productId, 80),
+            variantId: item.variantId ? sanitizeString(item.variantId, 80) : null,
+            quantity: Math.min(10, qty),
+          };
+        })
+        .filter((item) => item && item.productId);
 
       if (!normalizedItems.length) {
         return res.status(400).json({ error: 'Produtos inválidos' });
@@ -203,7 +210,7 @@ class OrderController {
             idempotencyKey,
             paymentExpiresAt,
             paymentMethod,
-            couponCode,
+            couponCode: coupon ? coupon.code : null,
             checkoutData: req.body.checkoutData || null,
             adminNotes,
             clientIp: req.ip || req.headers['x-forwarded-for']?.split(',')[0]?.trim() || null,
@@ -240,14 +247,7 @@ class OrderController {
           await reserveStockForOrderItem(tx, item, orderItem.id, sellable);
         }
 
-        if (coupon) {
-          await recordCouponUsage(tx, {
-            coupon,
-            userId,
-            orderId: created.id,
-            discountCents,
-          });
-        }
+        // Cupom: só segura capacidade via pedido PENDING; usedCount no PAID (fulfillPaidOrder)
 
         await syncUserProfileFromCheckout(tx, userId, req.body.checkoutData);
 
@@ -272,6 +272,24 @@ class OrderController {
           .catch(() => {});
       } catch {
         /* ignore */
+      }
+
+      // Pedido gratuito (cupom 100% / total 0): liberar automaticamente
+      if (order.status === 'PENDING' && Number(order.total) === 0) {
+        try {
+          const fulfilled = await prisma.$transaction(async (tx) =>
+            fulfillPaidOrder(tx, order.id, {
+              provider: 'zero-total',
+              description: 'Pedido gratuito — liberação automática',
+            })
+          );
+          notifyOrderChatCreated(fulfilled);
+          orderEmailService.notifyPaymentConfirmed(fulfilled.id);
+          emitOrderPaidSideEffects(fulfilled.id);
+          return res.status(201).json({ order: fulfilled });
+        } catch (err) {
+          console.error('[OrderController.create] zero-total fulfill', err);
+        }
       }
 
       return res.status(201).json({ order });
@@ -323,7 +341,7 @@ class OrderController {
       const order = await prisma.order.findUnique({
         where: { id },
         include: {
-          user: { select: { email: true, name: true } },
+          user: { select: { email: true, name: true, phone: true, document: true } },
           chat: {
             select: {
               id: true,
@@ -361,7 +379,7 @@ class OrderController {
           const refreshed = await prisma.order.findUnique({
             where: { id },
             include: {
-              user: { select: { email: true, name: true } },
+              user: { select: { email: true, name: true, phone: true, document: true } },
               items: {
                 include: {
                   product: { select: { name: true, imageUrl: true, slug: true, price: true } },
@@ -372,7 +390,8 @@ class OrderController {
           if (refreshed) Object.assign(order, refreshed);
 
           if (order.status === 'PENDING') {
-            const paymentMethod = String(req.query.paymentMethod || 'PIX').trim().toUpperCase();
+            // Método travado no pedido (evita bypass de cupom allowedPayments)
+            const paymentMethod = String(order.paymentMethod || 'PIX').trim().toUpperCase();
             paymentData = await getOrCreateCheckoutPayment(order, paymentMethod);
           }
         }
@@ -411,9 +430,25 @@ class OrderController {
       const { search, status, from, to, page = 1 } = req.query;
       const pageSize = 20;
       const skip = (Number(page) - 1) * pageSize;
+      const PAID_STATUSES = ['PAID', 'DELIVERED'];
+      const ALLOWED_STATUSES = ['PENDING', 'PAID', 'DELIVERED', 'REFUNDED', 'CANCELLED', 'PROCESSING'];
+
+      // Aceita status único, CSV ("PAID,DELIVERED") ou array (status[]=)
+      const rawStatuses = Array.isArray(status)
+        ? status.flatMap((s) => String(s).split(','))
+        : status
+          ? String(status).split(',')
+          : [];
+      const selectedStatuses = [...new Set(
+        rawStatuses.map((s) => s.trim().toUpperCase()).filter((s) => ALLOWED_STATUSES.includes(s))
+      )];
 
       const where = {};
-      if (status && status !== 'ALL') where.status = status;
+      if (selectedStatuses.length === 1) {
+        where.status = selectedStatuses[0];
+      } else if (selectedStatuses.length > 1) {
+        where.status = { in: selectedStatuses };
+      }
       if (from || to) {
         where.createdAt = {};
         if (from) where.createdAt.gte = new Date(from);
@@ -427,7 +462,11 @@ class OrderController {
         ];
       }
 
-      const [orders, total, stats] = await Promise.all([
+      // Base sem filtro de status — taxa de aprovação do período (nunca > 100%)
+      const whereWithoutStatus = { ...where };
+      delete whereWithoutStatus.status;
+
+      const [orders, total, stats, paidCount, approvalBase] = await Promise.all([
         prisma.order.findMany({
           where,
           include: {
@@ -456,11 +495,11 @@ class OrderController {
           _sum: { total: true },
           _avg: { total: true },
         }),
+        prisma.order.count({
+          where: { ...whereWithoutStatus, status: { in: PAID_STATUSES } },
+        }),
+        prisma.order.count({ where: whereWithoutStatus }),
       ]);
-
-      const paidCount = await prisma.order.count({
-        where: { ...where, status: { in: ['PAID', 'DELIVERED'] } },
-      });
 
       const formattedOrders = orders.map((o) => ({
         id: o.id,
@@ -485,7 +524,9 @@ class OrderController {
           totalRevenue: stats._sum.total || 0,
           totalOrders: total,
           avgTicket: Math.round(stats._avg.total || 0),
-          paidPct: total > 0 ? Math.round((paidCount / total) * 100) : 0,
+          paidPct: approvalBase > 0
+            ? Math.min(100, Math.round((paidCount / approvalBase) * 100))
+            : 0,
         },
         pagination: {
           page: Number(page),
@@ -583,9 +624,14 @@ class OrderController {
     try {
       const { id } = req.params;
       const { status } = req.body;
-      const allowed = ['PENDING', 'PAID', 'DELIVERED', 'CANCELLED'];
+      // PENDING não é transição válida a partir do admin (evita reverter PAID/DELIVERED)
+      const allowed = ['PAID', 'DELIVERED', 'CANCELLED'];
       if (!allowed.includes(status)) {
-        return res.status(400).json({ error: 'Status inválido' });
+        return res.status(400).json({
+          error: status === 'PENDING'
+            ? 'Não é permitido reabrir pedido como pendente'
+            : 'Status inválido',
+        });
       }
 
       const order = await prisma.$transaction(async (tx) => {
@@ -615,10 +661,7 @@ class OrderController {
           return updated;
         }
 
-        return tx.order.update({
-          where: { id },
-          data: { status },
-        });
+        throw new Error('Status inválido');
       });
 
       if (status === 'PAID') {
@@ -649,12 +692,17 @@ class OrderController {
       const { ids, status } = req.body;
       if (!Array.isArray(ids)) return res.status(400).json({ error: 'IDs inválidos' });
 
-      const allowed = ['PENDING', 'PAID', 'DELIVERED', 'CANCELLED'];
+      const allowed = ['PAID', 'DELIVERED', 'CANCELLED'];
       if (!allowed.includes(status)) {
-        return res.status(400).json({ error: 'Status inválido' });
+        return res.status(400).json({
+          error: status === 'PENDING'
+            ? 'Não é permitido reabrir pedidos como pendentes'
+            : 'Status inválido',
+        });
       }
 
       const paidOrders = [];
+      const deliveredResults = [];
 
       await prisma.$transaction(async (tx) => {
         for (const id of ids) {
@@ -666,8 +714,17 @@ class OrderController {
             paidOrders.push(order);
           } else if (status === 'CANCELLED') {
             await cancelOrder(tx, id, 'Cancelado em massa pelo administrador');
-          } else {
-            await tx.order.update({ where: { id }, data: { status } });
+          } else if (status === 'DELIVERED') {
+            const current = await tx.order.findUnique({ where: { id }, include: { items: true } });
+            if (!current) continue;
+            if (!['PAID', 'DELIVERED'].includes(current.status)) {
+              await fulfillPaidOrder(tx, id, {
+                provider: 'manual-admin',
+                description: 'Pagamento aprovado via admin (Bulk)',
+              });
+            }
+            const deliveryResult = await finalizeOrderDelivery(tx, id, { force: true });
+            deliveredResults.push(deliveryResult);
           }
         }
       });
@@ -676,6 +733,14 @@ class OrderController {
         notifyOrderChatCreated(order);
         orderEmailService.notifyPaymentConfirmed(order.id);
         emitOrderPaidSideEffects(order.id);
+      }
+
+      for (const deliveryResult of deliveredResults) {
+        if (deliveryResult?.changed) {
+          await emitDeliverySideEffects(deliveryResult);
+        } else if (deliveryResult?.orderId) {
+          orderEmailService.notifyOrderDelivered(deliveryResult.orderId);
+        }
       }
 
       if (status === 'CANCELLED') {

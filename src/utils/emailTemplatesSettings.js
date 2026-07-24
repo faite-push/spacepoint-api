@@ -36,6 +36,7 @@ const DEFAULT_SUBJECTS = {
   paymentConfirmed: 'Pagamento confirmado — pedido #{{orderId}} em processamento',
   orderDelivered: 'Seu pedido #{{orderId}} foi entregue',
   orderCancelled: 'Pedido #{{orderId}} cancelado — você pode refazer em 1 clique',
+  orderRefunded: 'Reembolso confirmado — pedido #{{orderId}}',
   reviewInvite: '{{customerName}}, como foi sua compra #{{orderId}}?',
   abandonedCartRecovery: '{{customerName}}, seu carrinho ainda está reservado',
   abandonedCartRecovery_step2: '{{customerName}}, ainda dá tempo — finalize seu carrinho',
@@ -54,6 +55,7 @@ const DEFAULT_PREHEADERS = {
   paymentConfirmed: 'Recebemos seu pagamento. Acompanhe a entrega na sua conta.',
   orderDelivered: 'Acesse os detalhes da entrega e as instruções de uso no chat do pedido.',
   orderCancelled: 'Se ainda quiser os produtos, é só refazer o pedido na loja.',
+  orderRefunded: 'O valor será creditado conforme o prazo do seu meio de pagamento.',
   reviewInvite: 'Sua opinião leva menos de 1 minuto e ajuda outros clientes.',
   abandonedCartRecovery: 'Seus itens ainda estão no carrinho. Finalize agora e garanta o seu.',
   abandonedCartRecovery_step2: 'Não deixe sua compra pela metade — o checkout está a um clique.',
@@ -642,8 +644,15 @@ function normalizeEmailTemplates(raw) {
   };
 }
 
+function stripStatusBadges(html) {
+  return String(html || '').replace(
+    /\s*<span style="display:inline-block;background:[^"]*border-radius:999px;">[^<]*<\/span>\s*/gi,
+    ''
+  );
+}
+
 function applyEmailTemplate(html, vars = {}) {
-  let out = String(html || '');
+  let out = stripStatusBadges(String(html || ''));
 
   out = out.replace(/\{\{#if\s+(\w+)\}\}([\s\S]*?)\{\{\/if\}\}/g, (_, key, inner) => {
     const value = vars[key];

@@ -1,5 +1,6 @@
 const SANDBOX_BASE_URL = 'https://sandbox.api.pagseguro.com';
 const PRODUCTION_BASE_URL = 'https://api.pagseguro.com';
+const { isGatewaySandbox } = require('../utils/gatewaySandbox');
 
 function normalizePagBankToken(raw) {
   if (!raw || typeof raw !== 'string') return '';
@@ -16,7 +17,7 @@ function getPagBankCredentials(config = {}) {
   const clientSecret = String(config.clientSecret || config.client_secret || '').trim();
   const hasOAuth = Boolean(clientId && clientSecret);
   const hasToken = Boolean(token);
-  const sandbox = config.sandbox !== false;
+  const sandbox = isGatewaySandbox(config);
 
   return {
     token,

@@ -1,6 +1,9 @@
 const { Server } = require('socket.io');
 const { verifyToken } = require('../config/jwt');
 const { prisma } = require('../config/prisma');
+const { isSuperOwner } = require('../utils/auth');
+const { FULL_ACCESS_PERMISSION } = require('../config/permissions');
+const { maskAdminChatPayload } = require('../utils/maskSensitive');
 
 let io = null;
 /** @type {Map<string, number>} */
@@ -8,6 +11,24 @@ const activeUsers = new Map();
 /** @type {Map<string, { userId: string; expires: number }>} */
 const joinChatCache = new Map();
 const JOIN_CACHE_TTL_MS = 60_000;
+
+async function loadAdminSocketFlags(userId, email) {
+  if (isSuperOwner(email)) {
+    return { canViewChats: true, canViewCodes: true };
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    include: { role: { include: { permissions: true } } },
+  });
+
+  const keys = user?.role?.permissions?.map((p) => p.key) || [];
+  const full = keys.includes(FULL_ACCESS_PERMISSION);
+  return {
+    canViewChats: full || keys.includes('chats:view') || keys.includes('chats:manage'),
+    canViewCodes: full || keys.includes('codes:view'),
+  };
+}
 
 const init = async (server, allowedOrigins) => {
   io = new Server(server, {
@@ -51,14 +72,29 @@ const init = async (server, allowedOrigins) => {
 
       const user = await prisma.user.findUnique({
         where: { id: payload.id },
-        select: { id: true, isAdmin: true },
+        select: { id: true, isAdmin: true, email: true },
       });
 
       if (!user) {
         return next(new Error('Authentication error: User not found'));
       }
 
-      socket.user = { id: user.id, isAdmin: Boolean(user.isAdmin) };
+      const isAdmin = Boolean(user.isAdmin);
+      let canViewChats = false;
+      let canViewCodes = false;
+
+      if (isAdmin) {
+        const flags = await loadAdminSocketFlags(user.id, user.email);
+        canViewChats = flags.canViewChats;
+        canViewCodes = flags.canViewCodes;
+      }
+
+      socket.user = {
+        id: user.id,
+        isAdmin,
+        canViewChats,
+        canViewCodes,
+      };
       next();
     } catch (err) {
       console.error('[SOCKET] Auth error:', err.message);
@@ -69,13 +105,15 @@ const init = async (server, allowedOrigins) => {
   io.on('connection', (socket) => {
     const userId = socket.user.id;
     const isAdmin = Boolean(socket.user.isAdmin);
+    const canViewChats = Boolean(socket.user.canViewChats);
 
     const currentConns = activeUsers.get(userId) || 0;
     activeUsers.set(userId, currentConns + 1);
 
     socket.join(`user_${userId}`);
 
-    if (isAdmin) {
+    // Só staff com chats:view entra na room de alertas
+    if (isAdmin && canViewChats) {
       socket.join('admins');
       socket.emit('presence_update', getActiveUsers());
     }
@@ -104,6 +142,10 @@ const init = async (server, allowedOrigins) => {
           return;
         }
 
+        if (isAdmin && !canViewChats) {
+          return;
+        }
+
         joinChatCache.set(cacheKey, { userId, expires: Date.now() + JOIN_CACHE_TTL_MS });
         socket.join(`chat_${chatId}`);
       } catch (err) {
@@ -117,7 +159,8 @@ const init = async (server, allowedOrigins) => {
 
     let typingTimer = null;
     socket.on('typing_start', ({ chatId }) => {
-      if (!chatId) return;
+      if (!chatId || typeof chatId !== 'string') return;
+      if (!socket.rooms.has(`chat_${chatId}`)) return;
       if (typingTimer) clearTimeout(typingTimer);
       emitToChat(chatId, 'typing', { chatId, userId, isTyping: true, isAdmin });
       typingTimer = setTimeout(() => {
@@ -126,7 +169,8 @@ const init = async (server, allowedOrigins) => {
     });
 
     socket.on('typing_stop', ({ chatId }) => {
-      if (!chatId) return;
+      if (!chatId || typeof chatId !== 'string') return;
+      if (!socket.rooms.has(`chat_${chatId}`)) return;
       if (typingTimer) clearTimeout(typingTimer);
       emitToChat(chatId, 'typing', { chatId, userId, isTyping: false, isAdmin });
     });
@@ -165,6 +209,35 @@ const emitToUser = (userId, event, data) => {
 
 const emitToAdmins = (event, data) => {
   if (io) io.to('admins').emit(event, data);
+};
+
+/**
+ * Emite chat_updated: cliente recebe payload completo;
+ * admins na room recebem versão mascarada salvo codes:view.
+ */
+const emitChatUpdated = (chatId, fullChat) => {
+  if (!io || !fullChat) return;
+
+  const customerId = fullChat.order?.userId;
+  const masked = maskAdminChatPayload(fullChat, { revealCodes: false });
+
+  if (customerId) {
+    emitToUser(customerId, 'chat_updated', fullChat);
+  }
+
+  const roomName = `chat_${chatId}`;
+  const room = io.sockets.adapter.rooms.get(roomName);
+  if (!room) return;
+
+  for (const socketId of room) {
+    const sock = io.sockets.sockets.get(socketId);
+    if (!sock?.user) continue;
+    if (sock.user.id === customerId) continue; // já recebeu via user_*
+    if (sock.user.isAdmin) {
+      const payload = sock.user.canViewCodes ? fullChat : masked;
+      sock.emit('chat_updated', payload);
+    }
+  }
 };
 
 /** Broadcast a new message — sem fan-out global de new_message para todos admins */
@@ -216,6 +289,7 @@ module.exports = {
   emitToChat,
   emitToUser,
   emitToAdmins,
+  emitChatUpdated,
   broadcastNewMessage,
   notifyChatCreated,
 };

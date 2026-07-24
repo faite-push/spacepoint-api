@@ -136,6 +136,47 @@ function stripPhone(value) {
 }
 
 /**
+ * Converte telefone BR (apenas dígitos) para o formato do Checkout PagBank.
+ * country: "+55", area: DDD (2), number: 9 dígitos começando com 9.
+ */
+function formatPagBankCheckoutPhone(phoneDigits) {
+  let digits = stripPhone(phoneDigits);
+  if (digits.startsWith('55') && digits.length >= 12) {
+    digits = digits.slice(2);
+  }
+  if (digits.length < 10 || digits.length > 11) return null;
+
+  const area = digits.slice(0, 2);
+  let number = digits.slice(2);
+  if (number.length === 8) {
+    number = `9${number}`;
+  }
+  if (number.length !== 9 || !number.startsWith('9')) return null;
+
+  return {
+    country: '+55',
+    area,
+    number,
+  };
+}
+
+/**
+ * Formato phones[] usado em Orders API (PIX PagBank).
+ */
+function formatPagBankOrderPhones(phoneDigits) {
+  const phone = formatPagBankCheckoutPhone(phoneDigits);
+  if (!phone) return null;
+  return [
+    {
+      country: '55',
+      area: phone.area,
+      number: phone.number,
+      type: 'MOBILE',
+    },
+  ];
+}
+
+/**
  * Persiste CPF e celular no perfil do usuário a partir do checkout.
  * Mantém histórico no pedido (checkoutData) e espelha no cadastro do cliente.
  */
@@ -226,12 +267,14 @@ function validateCheckoutData(checkoutSettings, checkoutData, requiredFieldKeys 
 
 function resolveCustomerFromOrder(order) {
   const data = order?.checkoutData && typeof order.checkoutData === 'object' ? order.checkoutData : {};
+  const phoneFromCheckout = stripPhone(data.phone);
+  const phoneFromUser = stripPhone(order?.user?.phone);
 
   return {
     customerName: String(data.name || order?.user?.name || 'Cliente').trim(),
     customerEmail: String(data.email || order?.user?.email || 'cliente@spacepoint.com').trim(),
-    customerCpf: stripCpf(data.cpf),
-    customerPhone: stripPhone(data.phone),
+    customerCpf: stripCpf(data.cpf || order?.user?.document || order?.user?.cpf),
+    customerPhone: phoneFromCheckout || phoneFromUser,
   };
 }
 
@@ -246,5 +289,7 @@ module.exports = {
   syncUserProfileFromCheckout,
   stripCpf,
   stripPhone,
+  formatPagBankCheckoutPhone,
+  formatPagBankOrderPhones,
   isValidCpf,
 };

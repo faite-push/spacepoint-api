@@ -13,7 +13,7 @@ const GATEWAY_CUSTOMER_FIELDS = {
   'efi-bank': { PIX: [], CARD: [] },
   'mercado-pago': { PIX: ['email'], CARD: ['email', 'name'] },
   pagbank: { PIX: ['name', 'email', 'cpf'], CARD: ['name', 'email', 'cpf'] },
-  stripe: { PIX: ['email', 'name'], CARD: ['email', 'name'] },
+  stripe: { PIX: [], CARD: ['email', 'name'] },
 };
 
 function normalizeSlug(slug) {

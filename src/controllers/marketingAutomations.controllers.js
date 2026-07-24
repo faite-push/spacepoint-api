@@ -89,6 +89,18 @@ class MarketingAutomationsController {
     }
   }
 
+  async sendCartRecoveryEmail(req, res) {
+    try {
+      const abandonedCartEmail = require('../services/abandonedCartEmail.service');
+      const data = await abandonedCartEmail.sendManualAbandonedCartRecovery(req.params.id);
+      return res.json(data);
+    } catch (err) {
+      const status = err.status || 500;
+      if (status >= 500) console.error('[Marketing.sendCartRecoveryEmail]', err);
+      return res.status(status).json({ error: err.message || 'Erro ao enviar e-mail' });
+    }
+  }
+
   async trackOpen(req, res) {
     try {
       await marketing.trackEmailOpen(req.params.token);

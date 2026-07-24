@@ -18,7 +18,7 @@ const { prisma } = require('../config/prisma');
 class PaymentController {
   async efiWebhook(req, res) {
     try {
-      const verification = assertEfiWebhook(req.body);
+      const verification = await assertEfiWebhook(req);
       if (!verification.valid) {
         console.warn('[PaymentController.efiWebhook] Rejected:', verification.error);
         return res.status(400).json({ error: verification.error });
@@ -58,7 +58,7 @@ class PaymentController {
   async pagbankWebhook(req, res) {
     try {
       const payload = { ...(req.query || {}), ...(req.body || {}) };
-      const verification = assertPagBankWebhook(req.body || {}, req.query || {});
+      const verification = await assertPagBankWebhook(req);
       if (!verification.valid) {
         console.warn('[PaymentController.pagbankWebhook] Rejected:', verification.error);
         return res.status(400).json({ error: verification.error });

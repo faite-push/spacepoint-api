@@ -3,6 +3,9 @@
  * sentMap: { "1": "ISO", "12": "ISO", ... } — chave = horas do delay.
  */
 
+/** Máximo de etapas da régua (alinhado aos templates _step2 / _step3). */
+const MAX_RECOVERY_STEPS = 3;
+
 function parseSentMap(raw, legacySentAt = null, legacyDelayHint = null) {
   const map = {};
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
@@ -84,17 +87,28 @@ function nextDueDelay({ delays, sentMap, anchorDate, inactivityMinutes = 0, now 
   return null;
 }
 
-/** Chave de template por etapa (step1 = base). */
+/** Chave de template por etapa (step1 = base; etapa ≥3 usa _step3). */
 function sequenceTemplateKey(baseKey, stepIndex = 1) {
-  const step = Math.max(1, Number(stepIndex) || 1);
+  const step = Math.min(MAX_RECOVERY_STEPS, Math.max(1, Number(stepIndex) || 1));
   if (step <= 1) return baseKey;
   return `${baseKey}_step${step}`;
 }
 
+function removeSentDelay(existingMap, delayHours) {
+  const hours = Number(delayHours);
+  const next = { ...(existingMap || {}) };
+  if (!Number.isFinite(hours) || hours <= 0) return next;
+  delete next[hours];
+  delete next[String(hours)];
+  return next;
+}
+
 module.exports = {
+  MAX_RECOVERY_STEPS,
   parseSentMap,
   countSentEmails,
   mergeSentMap,
+  removeSentDelay,
   nextDueDelay,
   sequenceTemplateKey,
 };

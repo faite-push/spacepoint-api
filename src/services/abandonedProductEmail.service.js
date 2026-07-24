@@ -7,7 +7,12 @@ const {
 } = require('./marketingAutomations.service');
 const { getEmailTemplates } = require('../utils/emailTemplatesSettings');
 const { priceToCents } = require('../utils/productStore');
-const { parseSentMap, mergeSentMap } = require('../utils/recoverySequence');
+const { resolveMediaUrl } = require('../utils/mediaUrl');
+const {
+  parseSentMap,
+  mergeSentMap,
+  removeSentDelay,
+} = require('../utils/recoverySequence');
 
 const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
 const API_PUBLIC_URL = (process.env.API_PUBLIC_URL || process.env.BACKEND_URL || '').replace(/\/$/, '');
@@ -40,6 +45,59 @@ async function loadSiteBranding() {
     customSubjects: templates.subjects,
     customPreheaders: templates.preheaders,
   };
+}
+
+async function claimProductEmailDelay(interestId, delayHours) {
+  const hours = Number(delayHours) || 1;
+  return prisma.$transaction(async (tx) => {
+    const rows = await tx.$queryRaw`
+      SELECT id, "recoveryEmailsSent", "recoveryEmailSentAt", "convertedAt", "archivedAt"
+      FROM "AbandonedProductInterest"
+      WHERE id = ${interestId}
+      FOR UPDATE
+    `;
+    const row = rows[0];
+    if (!row || row.convertedAt || row.archivedAt) return false;
+    const sentMap = parseSentMap(row.recoveryEmailsSent, row.recoveryEmailSentAt, hours);
+    if (sentMap[hours]) return false;
+    const nextMap = mergeSentMap(sentMap, hours);
+    await tx.abandonedProductInterest.update({
+      where: { id: interestId },
+      data: {
+        recoveryEmailSentAt: row.recoveryEmailSentAt || new Date(),
+        recoveryEmailsSent: nextMap,
+      },
+    });
+    return true;
+  });
+}
+
+async function releaseProductEmailDelay(interestId, delayHours) {
+  const hours = Number(delayHours) || 1;
+  try {
+    await prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw`
+        SELECT id, "recoveryEmailsSent", "recoveryEmailSentAt"
+        FROM "AbandonedProductInterest"
+        WHERE id = ${interestId}
+        FOR UPDATE
+      `;
+      const row = rows[0];
+      if (!row) return;
+      const sentMap = parseSentMap(row.recoveryEmailsSent, row.recoveryEmailSentAt, hours);
+      const nextMap = removeSentDelay(sentMap, hours);
+      await tx.abandonedProductInterest.update({
+        where: { id: interestId },
+        data: {
+          recoveryEmailsSent: Object.keys(nextMap).length ? nextMap : null,
+          recoveryEmailSentAt:
+            Object.keys(nextMap).length > 0 ? row.recoveryEmailSentAt || new Date() : null,
+        },
+      });
+    });
+  } catch (err) {
+    console.error('[abandonedProductEmail.releaseProductEmailDelay]', err.message);
+  }
 }
 
 async function loadInterestContext(interestId, { delayHours, stepIndex } = {}) {
@@ -96,7 +154,7 @@ async function loadInterestContext(interestId, { delayHours, stepIndex } = {}) {
   const label = interest.variant?.name
     ? `${interest.product.name} — ${interest.variant.name}`
     : interest.product.name;
-  const imageUrl = interest.variant?.imageUrl || interest.product.imageUrl || null;
+  const imageUrl = resolveMediaUrl(interest.variant?.imageUrl || interest.product.imageUrl || null);
 
   const trackBase = API_PUBLIC_URL || FRONTEND_URL;
   const productUrl = `${trackBase}/v2/api/marketing/track/click/${token}`;
@@ -139,14 +197,17 @@ async function loadInterestContext(interestId, { delayHours, stepIndex } = {}) {
   );
 }
 
-function notifyAbandonedProductRecovery(interestId, step = {}) {
-  const delayHours = step.delayHours || null;
+async function sendAbandonedProductRecovery(interestId, step = {}) {
+  const delayHours = step.delayHours || 1;
   const stepIndex = step.stepIndex || 1;
 
-  queueEmail('notifyAbandonedProductRecovery', async () => {
-    const ctx = await loadInterestContext(interestId, { delayHours, stepIndex });
-    if (!ctx) return;
+  const ctx = await loadInterestContext(interestId, { delayHours, stepIndex });
+  if (!ctx) return { sent: false };
 
+  const claimed = await claimProductEmailDelay(interestId, delayHours);
+  if (!claimed) return { sent: false };
+
+  try {
     const template = abandonedProductRecoveryEmail({
       storeName: ctx.storeName,
       customerName: ctx.customerName,
@@ -172,31 +233,24 @@ function notifyAbandonedProductRecovery(interestId, step = {}) {
       template.html
     );
 
-    if (sent) {
-      const row = await prisma.abandonedProductInterest.findUnique({
-        where: { id: interestId },
-        select: { recoveryEmailSentAt: true, recoveryEmailsSent: true },
-      });
-      const sentMap = parseSentMap(
-        row?.recoveryEmailsSent,
-        row?.recoveryEmailSentAt,
-        delayHours || 1
-      );
-      const nextMap = delayHours
-        ? mergeSentMap(sentMap, delayHours)
-        : mergeSentMap(sentMap, 1);
-
-      await prisma.abandonedProductInterest.update({
-        where: { id: interestId },
-        data: {
-          recoveryEmailSentAt: row?.recoveryEmailSentAt || new Date(),
-          recoveryEmailsSent: nextMap,
-        },
-      });
+    if (!sent) {
+      await releaseProductEmailDelay(interestId, delayHours);
+      return { sent: false };
     }
+    return { sent: true };
+  } catch (err) {
+    await releaseProductEmailDelay(interestId, delayHours);
+    throw err;
+  }
+}
+
+function notifyAbandonedProductRecovery(interestId, step = {}) {
+  queueEmail('notifyAbandonedProductRecovery', async () => {
+    await sendAbandonedProductRecovery(interestId, step);
   });
 }
 
 module.exports = {
   notifyAbandonedProductRecovery,
+  sendAbandonedProductRecovery,
 };

@@ -404,34 +404,31 @@ class CouponController {
       const { code } = req.query;
       if (!code) return res.status(400).json({ error: 'Código de cupom não informado' });
 
+      const { countPendingCouponHolds, normalizeCouponCode } = require('../services/coupon.service');
+
+      const normalized = normalizeCouponCode(code);
       const coupon = await prisma.coupon.findUnique({
-        where: { code: code.toUpperCase() },
+        where: { code: normalized },
       });
 
-      if (!coupon) {
-        return res.status(404).json({ error: 'Cupom não encontrado' });
-      }
+      const invalid = () => res.status(400).json({ error: 'Cupom inválido' });
 
-      if (!coupon.isActive) {
-        return res.status(400).json({ error: 'Este cupom não está mais ativo' });
-      }
+      if (!coupon || !coupon.isActive) return invalid();
 
       const now = new Date();
-      if (coupon.startDate && new Date(coupon.startDate) > now) {
-        return res.status(400).json({ error: 'Este cupom ainda não é válido' });
+      if (coupon.startDate && new Date(coupon.startDate) > now) return invalid();
+      if (coupon.endDate && new Date(coupon.endDate) < now) return invalid();
+
+      if (coupon.maxUses != null) {
+        const pendingHolds = await countPendingCouponHolds(prisma, {
+          couponCode: coupon.code,
+        });
+        if (coupon.usedCount + pendingHolds >= coupon.maxUses) return invalid();
       }
 
-      if (coupon.endDate && new Date(coupon.endDate) < now) {
-        return res.status(400).json({ error: 'Este cupom expirou' });
-      }
-
-      if (coupon.maxUses && coupon.usedCount >= coupon.maxUses) {
-        return res.status(400).json({ error: 'Este cupom atingiu o limite de usos' });
-      }
-
+      // Preview mínimo: o desconto definitivo é recalculado no create order
       return res.json({
         coupon: {
-          id: coupon.id,
           code: coupon.code,
           type: coupon.type,
           value: Number(coupon.value),

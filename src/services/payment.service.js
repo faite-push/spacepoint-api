@@ -85,8 +85,8 @@ async function findPendingPayment(orderId, paymentMethod) {
 }
 
 async function createDevMockPix(order) {
-  if (process.env.NODE_ENV === 'production' && !(await resolveActivePixGateway())) {
-    throw new Error('Gateway de pagamento não configurado');
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('Nenhum gateway PIX ativo. Ative um gateway na dashboard.');
   }
 
   const expiresAt = new Date(Date.now() + PIX_EXPIRATION_SECONDS * 1000).toISOString();
@@ -145,37 +145,62 @@ async function getCheckoutPaymentOptions(paymentMethod = 'PIX') {
 
 async function getOrCreateCheckoutPayment(order, paymentMethod = 'PIX') {
   const selectedMethod = normalizeCheckoutMethod(paymentMethod);
+  const lockedMethod = order.paymentMethod
+    ? normalizeCheckoutMethod(order.paymentMethod)
+    : selectedMethod;
   if (order.status !== 'PENDING') return null;
   if (order.total <= 0) {
     throw new Error('Valor do pedido inválido para pagamento');
   }
 
-  const existing = await findPendingPayment(order.id, selectedMethod);
-  if (existing) {
-    if (existing.provider !== 'dev-mock-pix') {
-      const fulfilled = await verifyAndFulfillPayment(existing);
+  // Lock no pedido evita duas cobranças concorrentes (refresh/poll)
+  const gate = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT 1 FROM "Order" WHERE id = ${order.id} FOR UPDATE`;
+
+    const current = await tx.order.findUnique({
+      where: { id: order.id },
+      select: { id: true, status: true, total: true, paymentMethod: true },
+    });
+    if (!current || current.status !== 'PENDING') return { action: 'noop' };
+
+    const existing = await tx.payment.findFirst({
+      where: {
+        orderId: order.id,
+        status: 'PENDING',
+        metadata: { path: ['type'], equals: lockedMethod },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (existing) {
+      const meta = parsePaymentMetadata(existing);
+      const notExpired = !meta?.expiresAt || new Date(meta.expiresAt) > new Date();
+      if (lockedMethod === 'CARD' && meta?.checkoutUrl && notExpired) {
+        return { action: 'reuse', payment: existing, meta };
+      }
+      if (lockedMethod === 'PIX' && meta?.copyPaste && notExpired) {
+        return { action: 'reuse', payment: existing, meta };
+      }
+      await tx.payment.update({
+        where: { id: existing.id },
+        data: { status: 'CANCELLED' },
+      });
+    }
+
+    return { action: 'create', orderId: order.id, method: lockedMethod };
+  });
+
+  if (!gate || gate.action === 'noop') return null;
+
+  if (gate.action === 'reuse') {
+    if (gate.payment.provider !== 'dev-mock-pix') {
+      const fulfilled = await verifyAndFulfillPayment(gate.payment);
       if (fulfilled) return null;
     }
-
-    const meta = parsePaymentMetadata(existing);
-    if (selectedMethod === 'CARD' && meta?.checkoutUrl) {
-      if (!meta.expiresAt || new Date(meta.expiresAt) > new Date()) {
-        return meta;
-      }
-    }
-    if (selectedMethod === 'PIX' && meta?.copyPaste && meta?.expiresAt) {
-      if (new Date(meta.expiresAt) > new Date()) {
-        return meta;
-      }
-    }
-
-    await prisma.payment.update({
-      where: { id: existing.id },
-      data: { status: 'CANCELLED' },
-    });
+    return gate.meta;
   }
 
-  if (selectedMethod === 'CARD') {
+  if (gate.method === 'CARD') {
     const gateway = await resolveActiveCardGateway();
     if (!gateway) {
       throw new Error('Nenhum gateway de cartão está ativo. Ative Cartão em um gateway na dashboard.');

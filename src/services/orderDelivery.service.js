@@ -88,7 +88,7 @@ async function finalizeOrderDelivery(tx, orderId, options = {}) {
   const settings = await getReviewsSettings(tx);
   const chatUpdates = { updatedAt: now };
 
-  if (settings.enabled && settings.autoCloseChatOnDelivery !== false && chat.status !== 'CLOSED') {
+  if (settings.enabled && settings.autoCloseChatOnDelivery === true && chat.status !== 'CLOSED') {
     chatUpdates.status = 'CLOSED';
     chatUpdates.isResolved = true;
   }
@@ -161,7 +161,7 @@ async function emitDeliverySideEffects(result) {
     });
 
     if (chat) {
-      socketService.emitToChat(result.chatId, 'chat_updated', chat);
+      socketService.emitChatUpdated(result.chatId, chat);
       socketService.emitToUser(result.userId, 'new_message_alert', { chatId: result.chatId });
       socketService.emitToAdmins('chat_list_update', { chatId: result.chatId });
     }

@@ -1,12 +1,23 @@
 const { Router } = require('express');
 const router = Router();
+const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 
 const couponController = require('../controllers/coupon.controllers');
 const requireAdmin = require('../middleware/adminMiddleware');
 const authenticate = require('../middleware/authMiddleware');
 const requirePermission = require('../middleware/permissionMiddleware');
 
-router.get('/v2/api/coupons/validate', couponController.validate);
+const validateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKeyGenerator,
+  message: { error: 'Muitas tentativas de validação de cupom. Tente novamente em alguns minutos.' },
+});
+
+// Validação pública (preview no carrinho); desconto real só no create order
+router.get('/v2/api/coupons/validate', validateLimiter, couponController.validate);
 
 const adminGuard = [authenticate, requireAdmin];
 

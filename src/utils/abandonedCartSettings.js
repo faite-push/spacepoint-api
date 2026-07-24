@@ -4,6 +4,8 @@ const DEFAULT_WHATSAPP_CART =
 const DEFAULT_WHATSAPP_ORDER =
   'Olá! {{ nome }}, notamos que o seu pedido foi cancelado, mas não se preocupe, você consegue refazê-lo clicando no link a seguir, e caso tenha alguma dúvida estamos à disposição para te ajudar com essa compra {{ carrinho }}';
 
+const { MAX_RECOVERY_STEPS } = require('./recoverySequence');
+
 const CART_EMAIL_DELAY_OPTIONS = [1, 6, 12, 24];
 const PRODUCT_EMAIL_DELAY_OPTIONS = [1, 6, 12, 24, 48, 72, 96, 120, 144];
 const CANCELLED_ORDER_DELAY_OPTIONS = [1, 6, 12, 24];
@@ -11,7 +13,7 @@ const CANCELLED_ORDER_DELAY_OPTIONS = [1, 6, 12, 24];
 const DEFAULT_ABANDONED_CART_SETTINGS = {
   enabled: true,
   /** Minutos sem atividade para considerar o carrinho abandonado (listagem). */
-  inactivityMinutes: 20,
+  inactivityMinutes: 10,
   /** Horas após a última atividade para disparar o e-mail de recuperação (legado / menor delay ativo). */
   delayHours: 1,
   minSubtotalCents: 500,
@@ -38,15 +40,16 @@ function parseTimeHHmm(value, fallback) {
   return `${match[1].padStart(2, '0')}:${match[2]}`;
 }
 
-function normalizeDelayList(raw, allowed, fallback) {
+function normalizeDelayList(raw, allowed, fallback, maxSteps = MAX_RECOVERY_STEPS) {
   const source = Array.isArray(raw) ? raw : fallback;
   const set = new Set();
   for (const item of source) {
     const n = Number(item);
     if (allowed.includes(n)) set.add(n);
   }
-  const list = allowed.filter((h) => set.has(h));
-  return list.length ? list : [...fallback];
+  const list = allowed.filter((h) => set.has(h)).slice(0, maxSteps);
+  if (list.length) return list;
+  return allowed.filter((h) => fallback.includes(h)).slice(0, maxSteps);
 }
 
 function normalizeAbandonedCartSettings(raw) {
@@ -203,6 +206,7 @@ module.exports = {
   CART_EMAIL_DELAY_OPTIONS,
   PRODUCT_EMAIL_DELAY_OPTIONS,
   CANCELLED_ORDER_DELAY_OPTIONS,
+  MAX_RECOVERY_STEPS,
   normalizeAbandonedCartSettings,
   getAbandonedCartSettings,
   saveAbandonedCartSettings,

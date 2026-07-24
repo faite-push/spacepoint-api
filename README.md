@@ -33,6 +33,10 @@ A **SpacePoint API** é o coração da plataforma SpacePoint, responsável pelo 
    ```env
    DATABASE_URL="your-database-url"
    JWT_SECRET="your-secret"
+   # Token único para webhooks Efí + PagBank
+   WEBHOOK_SHARED_SECRET="chave-longa-aleatoria"
+   # Opcional: criptografar certificado Efí (.p12) no banco
+   # GATEWAY_ENCRYPTION_KEY="chave-longa-aleatoria"
    ```
 
 3. Execute as migrações do banco de dados:
@@ -49,6 +53,25 @@ A **SpacePoint API** é o coração da plataforma SpacePoint, responsável pelo 
    ```bash
    pnpm run dev
    ```
+
+## 🔔 Webhooks de pagamento
+
+Configure `API_PUBLIC_URL` (HTTPS em produção) e um único token:
+
+```env
+WEBHOOK_SHARED_SECRET="chave-longa-aleatoria"
+```
+
+Cadastre a URL **com o token** no painel de cada provedor:
+
+```text
+https://sua-api.com/v1/webhooks/efi/pix?token=SEU_WEBHOOK_SHARED_SECRET&ignorar=
+https://sua-api.com/v1/webhooks/pagbank?token=SEU_WEBHOOK_SHARED_SECRET
+https://sua-api.com/v1/webhooks/mercado-pago?token=SEU_WEBHOOK_SHARED_SECRET
+https://sua-api.com/v1/webhooks/stripe?token=SEU_WEBHOOK_SHARED_SECRET
+```
+
+Também aceita header `x-webhook-token`. Se o token na query não vier, Stripe/Mercado Pago ainda tentam validar a assinatura nativa usando o mesmo `WEBHOOK_SHARED_SECRET` (útil se você colar o `whsec_` / secret do provedor nessa variável).
 
 ## 📄 Licença
 

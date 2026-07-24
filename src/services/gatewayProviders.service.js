@@ -1,15 +1,13 @@
 const axios = require('axios');
 const { prisma } = require('../config/prisma');
 const { createEfiInstance } = require('../config/efi.config');
-const {
-  getPagBankCredentials,
-  pagBankAuthHeaders,
-} = require('../config/pagbank.config');
+const { getPagBankCredentials, pagBankAuthHeaders, } = require('../config/pagbank.config');
 const { resolveEfiCertificate } = require('./gatewayValidation.service');
 const { fulfillPaidOrder, notifyOrderChatCreated } = require('./orderFulfillment.service');
 const orderEmailService = require('./orderEmail.service');
 const { emitOrderPaidSideEffects } = require('./orderPaidSideEffects.service');
-const { resolveCustomerFromOrder } = require('../utils/checkoutConfig');
+const { resolveCustomerFromOrder, formatPagBankCheckoutPhone, formatPagBankOrderPhones } = require('../utils/checkoutConfig');
+const { isGatewaySandbox } = require('../utils/gatewaySandbox');
 
 const PIX_EXPIRATION_SECONDS = 30 * 60;
 const PROVIDER_SLUGS = ['efi-bank', 'mercado-pago', 'pagbank', 'stripe'];
@@ -19,9 +17,18 @@ function getPublicApiUrl() {
   return url ? url.replace(/\/$/, '') : null;
 }
 
-function webhookUrl(path) {
+function webhookUrl(path, { withToken = false, efiIgnore = false } = {}) {
   const base = getPublicApiUrl();
-  return base ? `${base}${path}` : null;
+  if (!base) return null;
+  let url = `${base}${path}`;
+  const secret = String(process.env.WEBHOOK_SHARED_SECRET || '').trim();
+  if (withToken && secret) {
+    const params = new URLSearchParams();
+    params.set('token', secret);
+    if (efiIgnore) params.set('ignorar', '');
+    url += `?${params.toString()}`;
+  }
+  return url;
 }
 
 function formatBrlFromCents(cents) {
@@ -32,8 +39,11 @@ function normalizeSlug(slug) {
   return slug === 'efi-pix' ? 'efi-bank' : slug;
 }
 
+const { unlockGatewayConfig } = require('../utils/gatewaySecrets');
+const { maskEmail } = require('../utils/maskSensitive');
+
 function getConfig(gateway) {
-  return gateway?.config || {};
+  return unlockGatewayConfig(gateway?.config || {});
 }
 
 async function getPagBankToken(config) {
@@ -99,8 +109,9 @@ async function createEfiPix(order, gateway) {
     clientId: config.clientId || config.client_id,
     clientSecret: config.clientSecret || config.client_secret,
     pixKey: config.pixKey || config.pix_key,
-    sandbox: config.sandbox !== false,
-    certificatePath: resolveEfiCertificate(config),
+    sandbox: isGatewaySandbox(config),
+    certificateBase64: config.certificateBase64,
+    certificatePath: config.certificateBase64 ? undefined : resolveEfiCertificate(config),
   });
 
   const body = {
@@ -134,7 +145,7 @@ async function createMercadoPagoPix(order, gateway) {
   const config = getConfig(gateway);
   const accessToken = config.accessToken || config.access_token;
   const { customerEmail: payerEmail } = resolveCustomerFromOrder(order);
-  const idempotencyKey = `pix-${order.id}-${Date.now()}`;
+  const idempotencyKey = `pix-${order.id}`;
 
   let data;
   try {
@@ -145,7 +156,7 @@ async function createMercadoPagoPix(order, gateway) {
       payer: { email: payerEmail },
       external_reference: order.id,
     };
-    const mpWebhook = webhookUrl('/v1/webhooks/mercado-pago');
+    const mpWebhook = webhookUrl('/v1/webhooks/mercado-pago', { withToken: true });
     if (mpWebhook) payload.notification_url = mpWebhook;
 
     const response = await axios.post(
@@ -191,34 +202,40 @@ async function createPagBankPix(order, gateway) {
   const token = await getPagBankToken(config);
   const baseUrl = creds.baseUrl;
 
-  const { customerName, customerEmail, customerCpf } = resolveCustomerFromOrder(order);
+  const { customerName, customerEmail, customerCpf, customerPhone } = resolveCustomerFromOrder(order);
 
+  if (!customerCpf || customerCpf.length !== 11) {
+    throw new Error('PagBank: CPF do comprador é obrigatório');
+  }
+
+  const customer = {
+    name: customerName.slice(0, 80),
+    email: customerEmail,
+    tax_id: customerCpf,
+  };
+  const phones = formatPagBankOrderPhones(customerPhone);
+  if (phones) customer.phones = phones;
+
+  // 1 line item = order.total (frete/desconto já embutidos) — evita divergência com o QR
   const orderPayload = {
     reference_id: order.id,
-    customer: {
-      name: customerName.slice(0, 80),
-      email: customerEmail,
-      tax_id: customerCpf && customerCpf.length === 11 ? customerCpf : '12345678909',
-    },
-    items: (order.items || []).length
-      ? (order.items || []).map((item, idx) => ({
-        reference_id: String(idx + 1),
-        name: (item.product?.name || item.variantName || 'Produto').slice(0, 100),
-        quantity: item.quantity || 1,
-        unit_amount: item.unitPrice || order.total,
-      }))
-      : [{
-        reference_id: '1',
-        name: 'Pedido',
-        quantity: 1,
-        unit_amount: order.total,
-      }],
+    customer,
+    items: [{
+      reference_id: '1',
+      name: String(`Pedido ${(order.id || '').slice(0, 12)}`)
+        .replace(/[^\w\sÀ-ÿ\-.,()/+&]/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 100) || 'Pedido',
+      quantity: 1,
+      unit_amount: Math.max(1, Number(order.total) || 1),
+    }],
     qr_codes: [{
       amount: { value: order.total },
       expiration_date: new Date(Date.now() + PIX_EXPIRATION_SECONDS * 1000).toISOString().split('.')[0] + 'Z',
     }],
   };
-  const pagbankWebhook = webhookUrl('/v1/webhooks/pagbank');
+  const pagbankWebhook = webhookUrl('/v1/webhooks/pagbank', { withToken: true });
   // Some sandbox environments fail if the webhook is not publicly reachable or has certain TLDs
   if (pagbankWebhook && !pagbankWebhook.includes('localhost')) {
     orderPayload.notification_urls = [pagbankWebhook];
@@ -240,7 +257,7 @@ async function createPagBankPix(order, gateway) {
     const msg = errorData?.error_messages?.[0]?.description
       || errorData?.message
       || err.message;
-    console.error('[createPagBankPix Error Detail]', JSON.stringify(errorData, null, 2));
+    console.error('[createPagBankPix Error Detail]', msg);
     throw new Error(`PagBank: ${msg}`);
   }
 
@@ -260,59 +277,6 @@ async function createPagBankPix(order, gateway) {
   return savePixPayment(order, 'pagbank', data.id, metadata);
 }
 
-async function createStripePix(order, gateway) {
-  const config = getConfig(gateway);
-  const secretKey = config.secretKey || config.secret_key;
-
-  const { customerName, customerEmail } = resolveCustomerFromOrder(order);
-
-  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-  const returnUrl = `${frontendUrl}/orders/${order.id}`;
-
-  const params = new URLSearchParams();
-  params.append('amount', String(order.total));
-  params.append('currency', 'brl');
-  params.append('confirm', 'true');
-  params.append('payment_method_types[]', 'pix');
-  params.append('payment_method_data[type]', 'pix');
-  params.append('payment_method_data[billing_details][name]', customerName);
-  params.append('payment_method_data[billing_details][email]', customerEmail);
-  params.append('return_url', returnUrl);
-  params.append('metadata[order_id]', order.id);
-  params.append('description', `Pedido ${order.id}`);
-
-
-  try {
-    const { data } = await axios.post('https://api.stripe.com/v1/payment_intents', params, {
-      auth: { username: secretKey, password: '' },
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      timeout: 20000,
-    });
-
-    const pix = data.next_action?.pix_display_qr_code;
-    if (!pix?.data) {
-      throw new Error('Stripe não retornou QR Code PIX (verifique se PIX está habilitado na conta Stripe Brasil)');
-    }
-
-    const metadata = {
-      type: 'PIX',
-      provider: 'stripe',
-      copyPaste: pix.data,
-      qrCode: pix.image_url_png || null,
-      expiresAt: pix.expires_at
-        ? new Date(pix.expires_at * 1000).toISOString()
-        : new Date(Date.now() + PIX_EXPIRATION_SECONDS * 1000).toISOString(),
-      paymentIntentId: data.id,
-    };
-
-    return savePixPayment(order, 'stripe', data.id, metadata);
-  } catch (err) {
-    const stripeError = err.response?.data?.error?.message || err.message;
-    console.error('[Stripe Pix Error]', err.response?.data || err.message);
-    throw new Error(`Stripe: ${stripeError}`);
-  }
-}
-
 async function createStripeCard(order, gateway) {
   const config = getConfig(gateway);
   const secretKey = config.secretKey || config.secret_key;
@@ -330,23 +294,14 @@ async function createStripeCard(order, gateway) {
   params.append('expires_at', String(Math.floor((Date.now() + PIX_EXPIRATION_SECONDS * 1000) / 1000)));
   if (customerEmail) params.append('customer_email', customerEmail);
 
-  (order.items || []).forEach((item, idx) => {
-    const prefix = `line_items[${idx}]`;
-    params.append(`${prefix}[quantity]`, String(item.quantity || 1));
-    params.append(`${prefix}[price_data][currency]`, 'brl');
-    params.append(`${prefix}[price_data][unit_amount]`, String(item.unitPrice || order.total));
-    params.append(
-      `${prefix}[price_data][product_data][name]`,
-      String(item.product?.name || item.variantName || 'Produto').slice(0, 120)
-    );
-  });
-
-  if (!order.items?.length) {
-    params.append('line_items[0][quantity]', '1');
-    params.append('line_items[0][price_data][currency]', 'brl');
-    params.append('line_items[0][price_data][unit_amount]', String(order.total));
-    params.append('line_items[0][price_data][product_data][name]', `Pedido ${order.id}`);
-  }
+  // Cobrar exatamente order.total (inclui frete e desconto) — 1 line item
+  params.append('line_items[0][quantity]', '1');
+  params.append('line_items[0][price_data][currency]', 'brl');
+  params.append('line_items[0][price_data][unit_amount]', String(Math.max(1, Number(order.total) || 1)));
+  params.append(
+    'line_items[0][price_data][product_data][name]',
+    String(`Pedido ${(order.id || '').slice(0, 12)}`).slice(0, 120)
+  );
 
   try {
     const { data } = await axios.post('https://api.stripe.com/v1/checkout/sessions', params, {
@@ -384,19 +339,12 @@ async function createMercadoPagoCard(order, gateway) {
   }
   frontendUrl = frontendUrl.replace(/\/$/, '');
 
-  const items = (order.items || []).length
-    ? (order.items || []).map((item) => ({
-      title: String(item.product?.name || item.variantName || 'Produto').slice(0, 120),
-      quantity: item.quantity || 1,
-      unit_price: parseFloat(formatBrlFromCents(item.unitPrice || order.total)),
-      currency_id: 'BRL',
-    }))
-    : [{
-      title: `Pedido ${order.id}`,
-      quantity: 1,
-      unit_price: parseFloat(formatBrlFromCents(order.total)),
-      currency_id: 'BRL',
-    }];
+  const items = [{
+    title: String(`Pedido ${(order.id || '').slice(0, 12)}`).slice(0, 120),
+    quantity: 1,
+    unit_price: parseFloat(formatBrlFromCents(Math.max(1, Number(order.total) || 1))),
+    currency_id: 'BRL',
+  }];
 
   const isLocal = frontendUrl.includes('localhost') || frontendUrl.includes('127.0.0.1');
 
@@ -411,10 +359,8 @@ async function createMercadoPagoCard(order, gateway) {
     auto_return: isLocal ? undefined : 'approved',
   };
 
-  const mpWebhook = webhookUrl('/v1/webhooks/mercado-pago');
+  const mpWebhook = webhookUrl('/v1/webhooks/mercado-pago', { withToken: true });
   if (mpWebhook) payload.notification_url = mpWebhook;
-
-  console.log('[MercadoPago Payload]', JSON.stringify(payload, null, 2));
 
   try {
     const { data } = await axios.post(
@@ -446,67 +392,104 @@ async function createMercadoPagoCard(order, gateway) {
   }
 }
 
+function toSandboxBuyerEmail(email) {
+  const raw = String(email || 'cliente@spacepoint.com').trim().toLowerCase();
+  if (raw.endsWith('@sandbox.pagseguro.com.br')) return raw.slice(0, 60);
+  const local = raw.split('@')[0] || 'cliente';
+  const safeLocal = local.replace(/[^a-z0-9._+-]/g, '').slice(0, 40) || 'cliente';
+  return `${safeLocal}@sandbox.pagseguro.com.br`.slice(0, 60);
+}
+
 async function createPagBankCard(order, gateway) {
   const config = getConfig(gateway);
   const creds = getPagBankCredentials(config);
   const token = await getPagBankToken(config);
   const baseUrl = creds.baseUrl;
 
-  const { customerName, customerEmail, customerCpf } = resolveCustomerFromOrder(order);
+  const { customerName, customerEmail, customerCpf, customerPhone } = resolveCustomerFromOrder(order);
 
-  const items = (order.items || []).length
-    ? (order.items || []).map((item, idx) => ({
-      reference_id: `ITEM${idx + 1}`,
-      name: String(item.product?.name || item.variantName || 'Produto')
-        .replace(/[^\w\sÀ-ÿ\-.,()/+&]/gi, ' ')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 100) || 'Produto',
-      quantity: Math.max(1, Number(item.quantity) || 1),
-      unit_amount: Math.max(1, Number(item.unitPrice) || Number(order.total) || 1),
-    }))
-    : [{
-      reference_id: 'ITEM1',
-      name: 'Pedido',
-      quantity: 1,
-      unit_amount: Math.max(1, Number(order.total) || 1),
-    }];
+  if (!customerCpf || customerCpf.length !== 11) {
+    throw new Error('PagBank: CPF do comprador é obrigatório');
+  }
+
+  // No sandbox, e-mail @gmail/@outlook costuma falhar no Checkout hospedado.
+  // PagBank recomenda domínio @sandbox.pagseguro.com.br para comprador de teste.
+  const emailForCheckout = creds.sandbox
+    ? toSandboxBuyerEmail(customerEmail)
+    : String(customerEmail || 'cliente@email.com').slice(0, 60);
+
+  const customer = {
+    name: String(customerName || 'Cliente').slice(0, 80),
+    email: emailForCheckout,
+    tax_id: customerCpf,
+  };
+
+  let phone = formatPagBankCheckoutPhone(customerPhone);
+  // Checkout sandbox frequentemente exige celular; usa placeholder válido se faltar
+  if (!phone && creds.sandbox) {
+    phone = { country: '+55', area: '11', number: '999999999' };
+  }
+  if (phone) {
+    customer.phone = phone;
+  }
+
+  const items = [{
+    reference_id: 'ITEM1',
+    name: String(`Pedido ${(order.id || '').slice(0, 12)}`)
+      .replace(/[^\w\sÀ-ÿ\-.,()/+&]/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 100) || 'Pedido',
+    quantity: 1,
+    unit_amount: Math.max(1, Number(order.total) || 1),
+  }];
 
   const payload = {
     reference_id: String(order.id).slice(0, 64),
-    customer: {
-      name: String(customerName || 'Cliente').slice(0, 80),
-      email: String(customerEmail || 'cliente@email.com').slice(0, 60),
-      tax_id: customerCpf && customerCpf.length === 11 ? customerCpf : '12345678909',
-    },
-    customer_modifiable: true,
+    customer,
+    // Em produção trava dados do comprador; sandbox permite ajuste no hosted checkout
+    customer_modifiable: Boolean(creds.sandbox),
     items,
-    // Checkout PagBank: CREDIT_CARD com brands evita invalid_list_element_value no sandbox.
-    // DEBIT_CARD sem brands costuma falhar em alguns ambientes de teste.
+    soft_descriptor: 'SpacePoint',
     payment_methods: [
       {
         type: 'CREDIT_CARD',
-        brands: ['VISA', 'MASTERCARD', 'ELO', 'AMEX', 'HIPERCARD'],
+        brands: ['VISA', 'MASTERCARD', 'ELO', 'AMEX', 'HIPERCARD', 'HIPER'],
+      },
+    ],
+    payment_methods_configs: [
+      {
+        type: 'CREDIT_CARD',
+        config_options: [
+          { option: 'INSTALLMENTS_LIMIT', value: '1' },
+        ],
       },
     ],
   };
 
-  const pagbankWebhook = webhookUrl('/v1/webhooks/pagbank');
-  // Mesma regra do PIX: localhost/URLs privadas falham no PagBank (invalid_list_element_value).
+  const pagbankWebhook = webhookUrl('/v1/webhooks/pagbank', { withToken: true });
   if (
     pagbankWebhook
     && !pagbankWebhook.includes('localhost')
     && !pagbankWebhook.includes('127.0.0.1')
     && pagbankWebhook.startsWith('https://')
   ) {
-    payload.notification_urls = [pagbankWebhook.slice(0, 100)];
-    payload.payment_notification_urls = [pagbankWebhook.slice(0, 100)];
+    payload.notification_urls = [pagbankWebhook];
+    payload.payment_notification_urls = [pagbankWebhook];
   }
 
   const storeUrl = String(process.env.FRONTEND_URL || '').replace(/\/$/, '');
   if (storeUrl.startsWith('https://')) {
     payload.return_url = `${storeUrl}/checkout/payment/${order.id}`.slice(0, 255);
   }
+
+  console.log('[createPagBankCard]', {
+    sandbox: creds.sandbox,
+    baseUrl,
+    email: maskEmail(customer.email),
+    hasPhone: Boolean(customer.phone),
+    amount: order.total,
+  });
 
   try {
     const { data } = await axios.post(
@@ -521,11 +504,16 @@ async function createPagBankCard(order, gateway) {
     const checkoutUrl = data.links?.find((l) => ['PAY', 'CHECKOUT'].includes(l.rel))?.href;
     if (!checkoutUrl) throw new Error('PagBank não retornou URL de checkout');
 
+    if (creds.sandbox && !String(checkoutUrl).includes('sandbox')) {
+      console.warn('[createPagBankCard] URL sem sandbox — confira se o token é de teste');
+    }
+
     const metadata = {
       type: 'CARD',
       provider: 'pagbank',
       checkoutUrl,
       checkoutId: data.id,
+      sandbox: creds.sandbox,
       expiresAt: new Date(Date.now() + PIX_EXPIRATION_SECONDS * 1000).toISOString(),
     };
 
@@ -537,9 +525,40 @@ async function createPagBankCard(order, gateway) {
       || errorData?.message
       || err.message;
     const param = first?.parameter_name ? ` (${first.parameter_name})` : '';
-    console.error('[createPagBankCard Error Detail]', JSON.stringify(errorData, null, 2));
+    console.error('[createPagBankCard Error Detail]', first?.description || msg);
     throw new Error(`PagBank: ${msg}${param}`);
   }
+}
+
+function formatEfiApiError(err) {
+  const desc = err?.error_description;
+  if (typeof desc === 'string' && desc.trim()) return desc;
+  if (desc && typeof desc === 'object') {
+    if (typeof desc.message === 'string') return desc.message;
+    if (typeof desc.property === 'string') {
+      return `Parâmetro inválido: ${desc.property}`;
+    }
+    try {
+      return JSON.stringify(desc);
+    } catch {
+      /* ignore */
+    }
+  }
+  if (typeof err?.error === 'string' && err.error.trim()) return err.error;
+  if (typeof err?.message === 'string' && err.message.trim() && err.message !== '[object Object]') {
+    return err.message;
+  }
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return 'Falha ao criar link Efí';
+  }
+}
+
+/** expire_at da API de Cobranças exige yyyy-mm-dd (não datetime ISO). */
+function efiLinkExpireDate(daysFromNow = 1) {
+  const d = new Date(Date.now() + Math.max(1, daysFromNow) * 24 * 60 * 60 * 1000);
+  return d.toISOString().slice(0, 10);
 }
 
 async function createEfiCard(order, gateway) {
@@ -547,30 +566,50 @@ async function createEfiCard(order, gateway) {
   const efi = createEfiInstance({
     clientId: config.clientId || config.client_id,
     clientSecret: config.clientSecret || config.client_secret,
-    sandbox: config.sandbox !== false,
-    certificatePath: resolveEfiCertificate(config),
+    sandbox: isGatewaySandbox(config),
+    certificateBase64: config.certificateBase64,
+    certificatePath: config.certificateBase64 ? undefined : resolveEfiCertificate(config),
   });
+
+  const { customerEmail } = resolveCustomerFromOrder(order);
+  const expireAt = efiLinkExpireDate(1);
+  const itemName = String(`Pedido ${(order.id || '').slice(0, 12)}`)
+    .replace(/[^\w\sÀ-ÿ\-.,()/+&]/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 255) || 'Pedido';
 
   const body = {
     items: [{
-      name: `Pedido ${order.id}`.slice(0, 100),
-      value: order.total,
+      name: itemName,
+      value: Math.max(1, Number(order.total) || 1),
       amount: 1,
     }],
     metadata: {
-      custom_id: order.id,
+      custom_id: String(order.id).slice(0, 255),
     },
     settings: {
-      payment_method: 'all',
-      expire_at: new Date(Date.now() + PIX_EXPIRATION_SECONDS * 1000).toISOString().slice(0, 19),
-      message: `Pedido ${order.id}`,
+      payment_method: 'credit_card',
+      expire_at: expireAt,
+      request_delivery_address: false,
+      message: `Pedido ${(order.id || '').slice(0, 12)}`.slice(0, 80),
     },
   };
 
+  if (customerEmail) {
+    body.customer = { email: String(customerEmail).slice(0, 255) };
+  }
+
   try {
-    const charge = await efi.createOneStepLink([], body);
-    const checkoutUrl = charge.payment_url || charge.link || charge.data?.payment_url;
-    const chargeId = String(charge.charge_id || charge.id || `efi-link-${order.id}-${Date.now()}`);
+    const charge = await efi.createOneStepLink({}, body);
+    const data = charge?.data || charge;
+    const checkoutUrl = data?.payment_url || data?.link || charge?.payment_url;
+    const chargeId = String(
+      data?.charge_id
+      || charge?.charge_id
+      || data?.id
+      || `efi-link-${order.id}-${Date.now()}`
+    );
 
     if (!checkoutUrl) throw new Error('Efí não retornou link de pagamento');
 
@@ -579,13 +618,13 @@ async function createEfiCard(order, gateway) {
       provider: 'efi-bank',
       checkoutUrl,
       chargeId,
-      expiresAt: new Date(Date.now() + PIX_EXPIRATION_SECONDS * 1000).toISOString(),
+      expiresAt: new Date(`${expireAt}T23:59:59.000Z`).toISOString(),
     };
 
     return saveCardPayment(order, 'efi-bank', chargeId, metadata);
   } catch (err) {
-    const msg = err?.error_description || err?.message || 'Falha ao criar link Efí';
-    throw new Error(`Efí Bank: ${msg}`);
+    console.error('[createEfiCard Error Detail]', err);
+    throw new Error(`Efí Bank: ${formatEfiApiError(err)}`);
   }
 }
 
@@ -621,21 +660,73 @@ async function createCardCharge(order, gateway) {
 async function markPaymentPaid(payment, paidCents, description) {
   let orderResult = null;
   let fulfilled = false;
+  let shouldNotify = false;
 
   await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT 1 FROM "Payment" WHERE id = ${payment.id} FOR UPDATE`;
+    await tx.$executeRaw`SELECT 1 FROM "Order" WHERE id = ${payment.orderId} FOR UPDATE`;
 
     const currentPayment = await tx.payment.findUnique({ where: { id: payment.id } });
-    if (!currentPayment || currentPayment.status !== 'PENDING') {
+    // Aceita PENDING e CANCELLED (pedido/cobrança expirados antes do webhook)
+    if (!currentPayment || !['PENDING', 'CANCELLED'].includes(currentPayment.status)) {
       fulfilled = currentPayment?.status === 'PAID';
       return;
     }
+
+    const order = await tx.order.findUnique({
+      where: { id: payment.orderId },
+      select: { id: true, status: true, total: true },
+    });
+    if (!order) return;
+
+    // Já pago: só garante o registro deste payment (idempotência)
+    if (['PAID', 'DELIVERED'].includes(order.status)) {
+      if (currentPayment.status !== 'PAID') {
+        await tx.payment.update({
+          where: { id: payment.id },
+          data: { status: 'PAID', amount: paidCents ?? currentPayment.amount },
+        });
+      }
+      fulfilled = true;
+      return;
+    }
+
+    if (!['PENDING', 'CANCELLED'].includes(order.status)) {
+      console.error('[markPaymentPaid] status de pedido incompatível', {
+        orderId: order.id,
+        orderStatus: order.status,
+        paymentId: currentPayment.id,
+      });
+      return;
+    }
+
+    const expected = Number(order.total) || Number(currentPayment.amount) || 0;
+    if (paidCents == null || paidCents < expected - 1) {
+      console.error('[markPaymentPaid] valor insuficiente', {
+        orderId: order.id,
+        paidCents,
+        expected,
+        paymentId: currentPayment.id,
+      });
+      return;
+    }
+
+    // Reabre cobrança CANCELLED antes do fulfill (skipPaymentCreate atualiza este registro)
+    if (currentPayment.status === 'CANCELLED') {
+      await tx.payment.update({
+        where: { id: payment.id },
+        data: { status: 'PENDING' },
+      });
+    }
+
+    const recoverFromCancellation = order.status === 'CANCELLED';
 
     orderResult = await fulfillPaidOrder(tx, payment.orderId, {
       provider: payment.provider,
       externalId: payment.externalId,
       description,
       skipPaymentCreate: true,
+      recoverFromCancellation,
     });
 
     await tx.payment.update({
@@ -643,10 +734,21 @@ async function markPaymentPaid(payment, paidCents, description) {
       data: { status: 'PAID', amount: paidCents },
     });
 
+    // Cancela outras cobranças PENDING do mesmo pedido (evita double-pay side-effects)
+    await tx.payment.updateMany({
+      where: {
+        orderId: payment.orderId,
+        status: 'PENDING',
+        id: { not: payment.id },
+      },
+      data: { status: 'CANCELLED' },
+    });
+
     fulfilled = true;
+    shouldNotify = true;
   });
 
-  if (orderResult && fulfilled) {
+  if (orderResult && fulfilled && shouldNotify) {
     notifyOrderChatCreated(orderResult);
     orderEmailService.notifyPaymentConfirmed(orderResult.id);
     emitOrderPaidSideEffects(orderResult.id);
@@ -662,18 +764,21 @@ async function verifyEfiPayment(payment, gateway) {
     const efi = createEfiInstance({
       clientId: config.clientId || config.client_id,
       clientSecret: config.clientSecret || config.client_secret,
-      sandbox: config.sandbox !== false,
-      certificatePath: resolveEfiCertificate(config),
+      sandbox: isGatewaySandbox(config),
+      certificateBase64: config.certificateBase64,
+      certificatePath: config.certificateBase64 ? undefined : resolveEfiCertificate(config),
     });
 
     try {
-      const detail = await efi.detailCharge({ id: payment.externalId });
+      const detail = await efi.detailCharge({ id: Number(payment.externalId) || payment.externalId });
       const status = detail?.data?.status || detail?.status;
       const isPaid = ['paid', 'settled', 'approved'].includes(String(status || '').toLowerCase());
       if (!isPaid) return false;
-      const paidCents = detail?.data?.total
-        ? Math.round(parseFloat(detail.data.total) * 100)
-        : payment.amount;
+      // API Cobranças retorna total já em centavos
+      const paidCents = detail?.data?.total != null
+        ? Math.round(Number(detail.data.total))
+        : null;
+      if (paidCents == null || paidCents < payment.amount - 1) return false;
       await markPaymentPaid(payment, paidCents, 'Pagamento cartão Efí confirmado');
       return true;
     } catch {
@@ -685,8 +790,9 @@ async function verifyEfiPayment(payment, gateway) {
   const efi = createEfiInstance({
     clientId: config.clientId || config.client_id,
     clientSecret: config.clientSecret || config.client_secret,
-    sandbox: config.sandbox !== false,
-    certificatePath: resolveEfiCertificate(config),
+    sandbox: isGatewaySandbox(config),
+    certificateBase64: config.certificateBase64,
+    certificatePath: config.certificateBase64 ? undefined : resolveEfiCertificate(config),
   });
   const detail = await efi.pixDetailCharge({ txid });
   if (detail.status !== 'CONCLUIDA') return false;
@@ -799,7 +905,16 @@ async function verifyStripePayment(payment, gateway) {
     );
     const session = sessionResp.data;
     if (session.payment_status === 'paid') {
-      const paidCents = session.amount_total || payment.amount;
+      const paidCents = Number(session.amount_total);
+      if (!Number.isFinite(paidCents) || paidCents < payment.amount - 1) {
+        console.warn(
+          '[Stripe] Session paga com valor insuficiente',
+          payment.externalId,
+          paidCents,
+          payment.amount
+        );
+        return false;
+      }
       await markPaymentPaid(payment, paidCents, 'Pagamento cartão Stripe confirmado');
       return true;
     }
@@ -823,7 +938,7 @@ async function verifyStripePayment(payment, gateway) {
   if (!isPaid) return false;
   if ((data.amount_received || 0) < payment.amount - 1) return false;
 
-  await markPaymentPaid(payment, data.amount_received, 'Pagamento PIX Stripe confirmado');
+  await markPaymentPaid(payment, data.amount_received, 'Pagamento Stripe confirmado');
   return true;
 }
 
@@ -836,7 +951,37 @@ const VERIFIERS = {
 };
 
 async function verifyAndFulfillPayment(payment) {
-  if (!payment || payment.status !== 'PENDING') return false;
+  if (!payment) return false;
+  if (payment.status === 'PAID') return true;
+
+  // Cobrança CANCELLED (QR regenerado ou pedido expirado): reabre se o pedido
+  // ainda for PENDING/CANCELLED e não houver outra cobrança ativa/paga.
+  if (payment.status === 'CANCELLED') {
+    const order = await prisma.order.findUnique({
+      where: { id: payment.orderId },
+      select: { status: true },
+    });
+    if (!order || !['PENDING', 'CANCELLED'].includes(order.status)) return false;
+
+    const activeOther = await prisma.payment.findFirst({
+      where: {
+        orderId: payment.orderId,
+        id: { not: payment.id },
+        status: { in: ['PENDING', 'PAID'] },
+      },
+      select: { id: true },
+    });
+    if (activeOther) return false;
+
+    await prisma.payment.update({
+      where: { id: payment.id },
+      data: { status: 'PENDING' },
+    });
+    payment = { ...payment, status: 'PENDING' };
+  } else if (payment.status !== 'PENDING') {
+    return false;
+  }
+
   const slug = normalizeSlug(payment.provider);
   const gateway = await prisma.gatewayConfig.findFirst({
     where: { slug: { in: [slug, payment.provider] } },
@@ -893,7 +1038,7 @@ async function findPaymentByMercadoPagoId(paymentId, gateway) {
       where: {
         orderId: data.external_reference,
         provider: 'mercado-pago',
-        status: 'PENDING',
+        status: { in: ['PENDING', 'CANCELLED'] },
       },
       orderBy: { createdAt: 'desc' },
     });

@@ -8,6 +8,12 @@ const {
   PAYMENT_RECOVERY_CANCEL_NOTES,
 } = require('./marketingAutomations.service');
 const { getEmailTemplates } = require('../utils/emailTemplatesSettings');
+const { resolveMediaUrl } = require('../utils/mediaUrl');
+const {
+  parseSentMap,
+  mergeSentMap,
+  removeSentDelay,
+} = require('../utils/recoverySequence');
 
 const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
 const API_PUBLIC_URL = (process.env.API_PUBLIC_URL || process.env.BACKEND_URL || '').replace(/\/$/, '');
@@ -20,6 +26,72 @@ function queueEmail(taskName, fn) {
       console.error(`[cancelledOrderEmail.${taskName}]`, err.message);
     }
   });
+}
+
+async function claimCancelledEmailDelay(orderId, delayHours) {
+  const hours = Number(delayHours) || 1;
+  return prisma.$transaction(async (tx) => {
+    const rows = await tx.$queryRaw`
+      SELECT id, "cancelledRecoveryEmailsSent", "cancelledRecoveryEmailSentAt",
+             "cancelledRecoveryConvertedAt", status
+      FROM "Order"
+      WHERE id = ${orderId}
+      FOR UPDATE
+    `;
+    const order = rows[0];
+    if (!order || order.status !== 'CANCELLED' || order.cancelledRecoveryConvertedAt) {
+      return false;
+    }
+    const sentMap = parseSentMap(
+      order.cancelledRecoveryEmailsSent,
+      order.cancelledRecoveryEmailSentAt,
+      hours
+    );
+    if (sentMap[hours]) return false;
+    const nextMap = mergeSentMap(sentMap, hours);
+    await tx.order.update({
+      where: { id: orderId },
+      data: {
+        cancelledRecoveryEmailSentAt: order.cancelledRecoveryEmailSentAt || new Date(),
+        cancelledRecoveryEmailsSent: nextMap,
+      },
+    });
+    return true;
+  });
+}
+
+async function releaseCancelledEmailDelay(orderId, delayHours) {
+  const hours = Number(delayHours) || 1;
+  try {
+    await prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw`
+        SELECT id, "cancelledRecoveryEmailsSent", "cancelledRecoveryEmailSentAt"
+        FROM "Order"
+        WHERE id = ${orderId}
+        FOR UPDATE
+      `;
+      const order = rows[0];
+      if (!order) return;
+      const sentMap = parseSentMap(
+        order.cancelledRecoveryEmailsSent,
+        order.cancelledRecoveryEmailSentAt,
+        hours
+      );
+      const nextMap = removeSentDelay(sentMap, hours);
+      await tx.order.update({
+        where: { id: orderId },
+        data: {
+          cancelledRecoveryEmailsSent: Object.keys(nextMap).length ? nextMap : null,
+          cancelledRecoveryEmailSentAt:
+            Object.keys(nextMap).length > 0
+              ? order.cancelledRecoveryEmailSentAt || new Date()
+              : null,
+        },
+      });
+    });
+  } catch (err) {
+    console.error('[cancelledOrderEmail.releaseCancelledEmailDelay]', err.message);
+  }
 }
 
 function isValidEmail(email) {
@@ -38,14 +110,14 @@ function extractCheckoutName(checkoutData) {
 
 function isPaymentRelatedCancel(adminNotes) {
   const notes = String(adminNotes || '');
-  if (!notes) return true; // genérico: ainda elegível
   if (notes.includes(AUTOMATION_HIDDEN_NOTE)) return false;
-  // Aceita cancelamentos por pagamento OU cancelamento admin genérico
+  // Sem nota: elegível (cancelamento genérico / expiração)
+  if (!notes.trim()) return true;
   const paymentRelated = PAYMENT_RECOVERY_CANCEL_NOTES.some((hint) =>
     notes.toLowerCase().includes(hint.toLowerCase())
   );
   const adminCancel = /cancelado pelo administrador|cancelado em massa/i.test(notes);
-  return paymentRelated || adminCancel || notes.length > 0;
+  return paymentRelated || adminCancel;
 }
 
 async function loadSiteBranding() {
@@ -74,6 +146,7 @@ async function listRecoverableCancelledOrderJobs({ delays, limit = 50 }) {
     where: {
       status: 'CANCELLED',
       updatedAt: { lte: cutoff },
+      cancelledRecoveryConvertedAt: null,
       NOT: {
         adminNotes: { contains: AUTOMATION_HIDDEN_NOTE },
       },
@@ -165,13 +238,13 @@ async function loadOrderContext(orderId, { delayHours, stepIndex } = {}) {
   if (
     !order ||
     order.status !== 'CANCELLED' ||
+    order.cancelledRecoveryConvertedAt ||
     (order.adminNotes || '').includes(AUTOMATION_HIDDEN_NOTE)
   ) {
     return null;
   }
 
   if (delayHours) {
-    const { parseSentMap } = require('../utils/recoverySequence');
     const sentMap = parseSentMap(
       order.cancelledRecoveryEmailsSent,
       order.cancelledRecoveryEmailSentAt,
@@ -193,7 +266,7 @@ async function loadOrderContext(orderId, { delayHours, stepIndex } = {}) {
       label: variantLabel ? `${item.product.name} — ${variantLabel}` : item.product.name,
       quantity: item.quantity,
       unitPrice: item.unitPrice,
-      imageUrl: item.variant?.imageUrl || item.product.imageUrl || null,
+      imageUrl: resolveMediaUrl(item.variant?.imageUrl || item.product.imageUrl || null),
     };
   });
 
@@ -236,14 +309,17 @@ async function loadOrderContext(orderId, { delayHours, stepIndex } = {}) {
   );
 }
 
-function notifyCancelledOrderRecovery(orderId, step = {}) {
-  const delayHours = step.delayHours || null;
+async function sendCancelledOrderRecovery(orderId, step = {}) {
+  const delayHours = step.delayHours || 1;
   const stepIndex = step.stepIndex || 1;
 
-  queueEmail('notifyCancelledOrderRecovery', async () => {
-    const ctx = await loadOrderContext(orderId, { delayHours, stepIndex });
-    if (!ctx) return;
+  const ctx = await loadOrderContext(orderId, { delayHours, stepIndex });
+  if (!ctx) return { sent: false };
 
+  const claimed = await claimCancelledEmailDelay(orderId, delayHours);
+  if (!claimed) return { sent: false };
+
+  try {
     const template = cancelledOrderRecoveryEmail({
       storeName: ctx.storeName,
       customerName: ctx.customerName,
@@ -270,32 +346,20 @@ function notifyCancelledOrderRecovery(orderId, step = {}) {
       template.html
     );
 
-    if (sent) {
-      const { parseSentMap, mergeSentMap } = require('../utils/recoverySequence');
-      const row = await prisma.order.findUnique({
-        where: { id: orderId },
-        select: {
-          cancelledRecoveryEmailSentAt: true,
-          cancelledRecoveryEmailsSent: true,
-        },
-      });
-      const sentMap = parseSentMap(
-        row?.cancelledRecoveryEmailsSent,
-        row?.cancelledRecoveryEmailSentAt,
-        delayHours || 1
-      );
-      const nextMap = delayHours
-        ? mergeSentMap(sentMap, delayHours)
-        : mergeSentMap(sentMap, 1);
-
-      await prisma.order.update({
-        where: { id: orderId },
-        data: {
-          cancelledRecoveryEmailSentAt: row?.cancelledRecoveryEmailSentAt || new Date(),
-          cancelledRecoveryEmailsSent: nextMap,
-        },
-      });
+    if (!sent) {
+      await releaseCancelledEmailDelay(orderId, delayHours);
+      return { sent: false };
     }
+    return { sent: true };
+  } catch (err) {
+    await releaseCancelledEmailDelay(orderId, delayHours);
+    throw err;
+  }
+}
+
+function notifyCancelledOrderRecovery(orderId, step = {}) {
+  queueEmail('notifyCancelledOrderRecovery', async () => {
+    await sendCancelledOrderRecovery(orderId, step);
   });
 }
 

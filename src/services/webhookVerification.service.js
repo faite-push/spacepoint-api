@@ -14,12 +14,34 @@ function timingSafeEqualHex(a, b) {
   }
 }
 
+function timingSafeEqualString(a, b) {
+  try {
+    const left = Buffer.from(String(a));
+    const right = Buffer.from(String(b));
+    if (left.length !== right.length) return false;
+    return crypto.timingSafeEqual(left, right);
+  } catch {
+    return false;
+  }
+}
+
 function getGatewayConfig(gateway) {
   return gateway?.config && typeof gateway.config === 'object' ? gateway.config : {};
 }
 
 function getWebhookSecret(config) {
   return config.webhookSecret || config.webhook_secret || null;
+}
+
+/**
+ * Token único da API para Efí/PagBank (provedores sem signing nativo).
+ * Preferência: WEBHOOK_SHARED_SECRET no .env.
+ * Fallback legado: webhookSecret no config do gateway.
+ */
+function getSharedWebhookSecret(gatewayConfig = {}) {
+  const fromEnv = String(process.env.WEBHOOK_SHARED_SECRET || '').trim();
+  if (fromEnv) return fromEnv;
+  return getWebhookSecret(gatewayConfig);
 }
 
 async function findActiveGateway(slugs) {
@@ -104,6 +126,32 @@ function verifyStripeSignature(rawBody, signatureHeader, secret) {
   return { valid: true };
 }
 
+/**
+ * Aceita token no header (preferível) ou na query (?token= / ?hmac=),
+ * pois Efí/PagBank não enviam header customizado — o secret vai na URL cadastrada.
+ */
+function verifySharedWebhookToken(req, secret) {
+  const provided =
+    req.headers['x-webhook-token']
+    || req.headers['x-pagseguro-token']
+    || req.query?.token
+    || req.query?.hmac
+    || '';
+
+  if (!provided) {
+    return {
+      valid: false,
+      error: 'Token de webhook ausente (header x-webhook-token ou ?token= na URL)',
+    };
+  }
+
+  if (!timingSafeEqualString(provided, secret)) {
+    return { valid: false, error: 'Token de webhook inválido' };
+  }
+
+  return { valid: true };
+}
+
 function verifyEfiWebhookPayload(body) {
   if (body?.pix) {
     if (!Array.isArray(body.pix) || body.pix.length === 0) {
@@ -143,35 +191,72 @@ function verifyPagBankWebhookPayload(body, query = {}) {
 
 async function assertMercadoPagoWebhook(req) {
   const gateway = await findActiveGateway(['mercado-pago']);
-  const secret = getWebhookSecret(getGatewayConfig(gateway));
+  const secret = getSharedWebhookSecret(getGatewayConfig(gateway));
 
   if (!secret) {
-    console.warn('[webhook] Mercado Pago: webhookSecret não configurado — confiando apenas na verificação via API');
-    return { valid: true, skipped: true };
+    console.error('[webhook] Mercado Pago: WEBHOOK_SHARED_SECRET não configurado — rejeitando');
+    return { valid: false, error: 'WEBHOOK_SHARED_SECRET não configurado no .env da API' };
   }
 
-  return verifyMercadoPagoSignature(req, secret);
+  // Preferência: mesmo token do .env (?token= ou header)
+  const tokenCheck = verifySharedWebhookToken(req, secret);
+  if (tokenCheck.valid) return tokenCheck;
+
+  // Fallback: se WEBHOOK_SHARED_SECRET for o secret de assinatura do MP
+  if (req.headers['x-signature']) {
+    return verifyMercadoPagoSignature(req, secret);
+  }
+
+  return tokenCheck;
 }
 
 async function assertStripeWebhook(req) {
   const gateway = await findActiveGateway(['stripe']);
-  const secret = getWebhookSecret(getGatewayConfig(gateway));
+  const secret = getSharedWebhookSecret(getGatewayConfig(gateway));
 
   if (!secret) {
-    console.warn('[webhook] Stripe: webhookSecret não configurado — confiando apenas na verificação via API');
-    return { valid: true, skipped: true };
+    console.error('[webhook] Stripe: WEBHOOK_SHARED_SECRET não configurado — rejeitando');
+    return { valid: false, error: 'WEBHOOK_SHARED_SECRET não configurado no .env da API' };
   }
 
-  const rawBody = req.rawBody ?? req.body;
-  return verifyStripeSignature(rawBody, req.headers['stripe-signature'], secret);
+  const tokenCheck = verifySharedWebhookToken(req, secret);
+  if (tokenCheck.valid) return tokenCheck;
+
+  // Fallback: se WEBHOOK_SHARED_SECRET for o whsec_ do Stripe
+  if (req.headers['stripe-signature']) {
+    const rawBody = req.rawBody ?? req.body;
+    return verifyStripeSignature(rawBody, req.headers['stripe-signature'], secret);
+  }
+
+  return tokenCheck;
 }
 
-function assertEfiWebhook(body) {
-  return verifyEfiWebhookPayload(body);
+async function assertEfiWebhook(req) {
+  const bodyCheck = verifyEfiWebhookPayload(req.body);
+  if (!bodyCheck.valid) return bodyCheck;
+
+  const gateway = await findActiveGateway(['efi-bank', 'efi-pix']);
+  const secret = getSharedWebhookSecret(getGatewayConfig(gateway));
+  if (!secret) {
+    console.error('[webhook] Efí: WEBHOOK_SHARED_SECRET não configurado — rejeitando');
+    return { valid: false, error: 'WEBHOOK_SHARED_SECRET não configurado no .env da API' };
+  }
+
+  return verifySharedWebhookToken(req, secret);
 }
 
-function assertPagBankWebhook(body, query = {}) {
-  return verifyPagBankWebhookPayload(body, query);
+async function assertPagBankWebhook(req) {
+  const bodyCheck = verifyPagBankWebhookPayload(req.body || {}, req.query || {});
+  if (!bodyCheck.valid) return bodyCheck;
+
+  const gateway = await findActiveGateway(['pagbank']);
+  const secret = getSharedWebhookSecret(getGatewayConfig(gateway));
+  if (!secret) {
+    console.error('[webhook] PagBank: WEBHOOK_SHARED_SECRET não configurado — rejeitando');
+    return { valid: false, error: 'WEBHOOK_SHARED_SECRET não configurado no .env da API' };
+  }
+
+  return verifySharedWebhookToken(req, secret);
 }
 
 module.exports = {
@@ -179,4 +264,5 @@ module.exports = {
   assertStripeWebhook,
   assertEfiWebhook,
   assertPagBankWebhook,
+  getSharedWebhookSecret,
 };

@@ -6,16 +6,12 @@ const {
   syncAutomaticStockFromCodes,
   ensureDigitalStockSynced,
 } = require('../utils/digitalStock');
+const { maskCode } = require('../utils/maskSensitive');
+const { userHasPermission } = require('../middleware/permissionMiddleware');
 
 const LOW_STOCK_THRESHOLD = 10;
 const MAX_BULK_LINES = 5000;
 const MAX_CODES_PAGE_SIZE = 100;
-
-function maskCode(code) {
-  const value = String(code || '');
-  if (value.length <= 8) return value;
-  return `${value.slice(0, 4)}••••${value.slice(-4)}`;
-}
 
 function resolveAvailableStock(variant, codeCounts) {
   if (variant.deliveryType === 'automatic_lines' || variant.deliveryType === 'mixed') {
@@ -209,6 +205,8 @@ class InventoryAdminController {
         }),
       ]);
 
+      const revealCodes = await userHasPermission(req.user.id, 'codes:view');
+
       return res.json({
         variant: {
           id: variant.id,
@@ -218,10 +216,15 @@ class InventoryAdminController {
           productId: variant.productId,
           productName: variant.product.name,
         },
-        codes: codes.map((row) => ({
-          ...row,
-          maskedCode: maskCode(row.code),
-        })),
+        codes: codes.map((row) => {
+          const masked = maskCode(row.code);
+          const { code, ...rest } = row;
+          return {
+            ...rest,
+            maskedCode: masked,
+            ...(revealCodes ? { code } : {}),
+          };
+        }),
         pagination: {
           page,
           pageSize,

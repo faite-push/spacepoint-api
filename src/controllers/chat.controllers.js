@@ -1,7 +1,7 @@
 const { prisma } = require('../config/prisma');
 const { sanitizeString, sanitizeChatContent } = require('../utils/sanitize');
 const { resolveSellable } = require('../utils/productStore');
-const { initializeChatForPaidOrder } = require('../services/chat.service');
+const { initializeChatForPaidOrder, postDeliveredCodesToChat } = require('../services/chat.service');
 const { randomBytes } = require('crypto');
 const socketService = require('../services/websocket.service');
 const { syncAutomaticStockFromCodes } = require('../utils/digitalStock');
@@ -18,6 +18,7 @@ const {
   AUDIT_ACTIONS,
   requestContext,
 } = require('../services/auditLog.service');
+const { maskAdminChatPayload, maskChatMessagesForViewer } = require('../utils/maskSensitive');
 
 const ORDER_LIST_INCLUDE = {
   user: { select: { id: true, name: true, email: true, image: true } },
@@ -74,7 +75,7 @@ async function fetchFullChat(chatId) {
 async function emitFullChatUpdate(chatId, extra = {}) {
   const fullChat = await fetchFullChat(chatId);
   if (!fullChat) return null;
-  socketService.emitToChat(chatId, 'chat_updated', fullChat);
+  socketService.emitChatUpdated(chatId, fullChat);
   if (!extra.skipListUpdate) {
     socketService.emitToAdmins('chat_list_update', { chatId, ...extra });
   }
@@ -136,10 +137,22 @@ class ChatController {
         if (order.status === 'PAID' || order.status === 'DELIVERED') {
           chat = await prisma.$transaction(async (tx) => {
             await initializeChatForPaidOrder(tx, order.id);
+            const created = await tx.chat.findUnique({
+              where: { orderId: order.id },
+              include: {
+                labels: true,
+                assignedTo: { select: { id: true, name: true, email: true, image: true } },
+                order: { include: ORDER_INCLUDE },
+              },
+            });
+            if (created?.id) {
+              await postDeliveredCodesToChat(tx, created.id, order.id);
+            }
             return tx.chat.findUnique({
               where: { orderId: order.id },
               include: {
                 labels: true,
+                assignedTo: { select: { id: true, name: true, email: true, image: true } },
                 order: { include: ORDER_INCLUDE },
               },
             });
@@ -153,6 +166,19 @@ class ChatController {
             },
           });
         }
+      } else if (order.status === 'PAID' || order.status === 'DELIVERED') {
+        // Recovery: códigos entregues no estoque mas sem mensagem DELIVERY no chat
+        await prisma.$transaction(async (tx) => {
+          await postDeliveredCodesToChat(tx, chat.id, order.id);
+        });
+        chat = await prisma.chat.findUnique({
+          where: { id: chat.id },
+          include: {
+            labels: true,
+            assignedTo: { select: { id: true, name: true, email: true, image: true } },
+            order: { include: ORDER_INCLUDE },
+          },
+        });
       }
 
       const messageLimit = Math.min(Math.max(Number(req.query.messageLimit) || 50, 1), 100);
@@ -174,19 +200,27 @@ class ChatController {
         _sum: { quantity: true },
       });
 
-      const response = {
-        ...chat,
-        messages,
-        messagesMeta: {
-          hasMore,
-          oldestId: messages[0]?.id ?? null,
+      let revealCodes = !isAdmin;
+      if (isAdmin) {
+        revealCodes = await userHasPermission(userId, 'codes:view');
+      }
+
+      const response = maskAdminChatPayload(
+        {
+          ...chat,
+          messages: maskChatMessagesForViewer(messages, { revealCodes }),
+          messagesMeta: {
+            hasMore,
+            oldestId: messages[0]?.id ?? null,
+          },
+          userStats: {
+            totalSpent: userStats._sum.total || 0,
+            ordersCount: userStats._count.id || 0,
+            itemsCount: itemsCount._sum.quantity || 0,
+          },
         },
-        userStats: {
-          totalSpent: userStats._sum.total || 0,
-          ordersCount: userStats._count.id || 0,
-          itemsCount: itemsCount._sum.quantity || 0,
-        },
-      };
+        { revealCodes }
+      );
 
       return res.json(response);
     } catch (err) {
@@ -366,7 +400,7 @@ class ChatController {
       });
 
       if (updatedChat) {
-        socketService.emitToChat(chatId, 'chat_updated', updatedChat);
+        socketService.emitChatUpdated(chatId, updatedChat);
         socketService.emitToUser(updatedChat.order.userId, 'new_message_alert', { chatId });
         socketService.emitToAdmins('chat_list_update', { chatId });
       }
@@ -513,8 +547,14 @@ class ChatController {
       const limit = req.query.limit;
       const result = await fetchChatMessages(chat.id, { before, limit, req });
 
+      let messages = result.messages;
+      if (isAdmin) {
+        const revealCodes = await userHasPermission(userId, 'codes:view');
+        messages = maskChatMessagesForViewer(messages, { revealCodes });
+      }
+
       return res.json({
-        messages: result.messages,
+        messages,
         messagesMeta: {
           hasMore: result.hasMore,
           oldestId: result.messages[0]?.id ?? null,
@@ -592,11 +632,16 @@ class ChatController {
         prisma.chat.count({ where }),
       ]);
 
+      const revealCodes = await userHasPermission(req.user.id, 'codes:view');
+
       return res.json({
-        chats: chats.map((chat) => ({
-          ...chat,
-          messages: signChatMessageFileUrls(chat.messages, req),
-        })),
+        chats: chats.map((chat) => {
+          const signed = {
+            ...chat,
+            messages: signChatMessageFileUrls(chat.messages, req),
+          };
+          return maskAdminChatPayload(signed, { revealCodes });
+        }),
         total,
         page: Number(page),
         totalPages: Math.ceil(total / pageSize),
@@ -887,6 +932,8 @@ class ChatController {
       });
       if (!chat) return res.status(404).json({ error: 'Chat não encontrado' });
 
+      const revealCodes = await userHasPermission(req.user.id, 'codes:view');
+
       const userStats = await prisma.order.aggregate({
         where: { userId: chat.order.userId, status: { in: ['PAID', 'DELIVERED'] } },
         _sum: { total: true },
@@ -897,15 +944,20 @@ class ChatController {
         _sum: { quantity: true },
       });
 
-      return res.json({
-        ...chat,
-        messages: signChatMessageFileUrls(chat.messages, req),
-        userStats: {
-          totalSpent: userStats._sum.total || 0,
-          ordersCount: userStats._count.id || 0,
-          itemsCount: itemsCount._sum.quantity || 0,
+      const payload = maskAdminChatPayload(
+        {
+          ...chat,
+          messages: signChatMessageFileUrls(chat.messages, req),
+          userStats: {
+            totalSpent: userStats._sum.total || 0,
+            ordersCount: userStats._count.id || 0,
+            itemsCount: itemsCount._sum.quantity || 0,
+          },
         },
-      });
+        { revealCodes }
+      );
+
+      return res.json(payload);
     } catch (err) {
       console.error('[ChatController.getChatById]', err);
       return res.status(500).json({ error: 'Erro ao buscar chat' });

@@ -262,6 +262,92 @@ async function initializeChatForPaidOrder(tx, orderId) {
   return chat;
 }
 
+/** Remove prefixo hex: usado em entregas manuais (`aabbccdd:conteudo`). */
+function decodeDeliveryCode(code) {
+  const raw = String(code || '');
+  const idx = raw.indexOf(':');
+  if (idx >= 0 && raw.length > idx + 1) {
+    const prefix = raw.slice(0, idx);
+    if (/^[a-f0-9]{8,}$/i.test(prefix)) return raw.slice(idx + 1);
+  }
+  return raw;
+}
+
+/**
+ * Publica no chat os códigos já DELIVERED que ainda não têm mensagem DELIVERY.
+ * Necessário na entrega automática (fulfillPaidOrder), que libera estoque sem postar no chat.
+ */
+async function postDeliveredCodesToChat(tx, chatId, orderId) {
+  if (!chatId || !orderId) return 0;
+
+  const items = await tx.orderItem.findMany({
+    where: { orderId },
+    include: {
+      product: { select: { name: true, imageUrl: true } },
+      codes: {
+        where: { status: 'DELIVERED' },
+        orderBy: { deliveredAt: 'asc' },
+      },
+    },
+  });
+
+  const existingDelivery = await tx.chatMessage.findMany({
+    where: { chatId, type: 'DELIVERY' },
+    select: { content: true },
+  });
+
+  const alreadyPosted = new Set();
+  for (const msg of existingDelivery) {
+    try {
+      const parsed = JSON.parse(msg.content);
+      if (parsed?.deliveryContent) alreadyPosted.add(String(parsed.deliveryContent));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  let posted = 0;
+
+  for (const item of items) {
+    const productName = item.variantName
+      ? `${item.product.name} — ${item.variantName}`
+      : item.product.name;
+
+    for (const codeRow of item.codes) {
+      const deliveryContent = decodeDeliveryCode(codeRow.code);
+      if (!deliveryContent || alreadyPosted.has(deliveryContent)) continue;
+
+      await tx.chatMessage.create({
+        data: {
+          chatId,
+          senderId: 'SYSTEM',
+          type: 'DELIVERY',
+          content: JSON.stringify({
+            title: 'Produto entregue',
+            description: 'Segue o conteúdo da sua compra.',
+            productName,
+            productImageUrl: item.product.imageUrl,
+            deliveryContent,
+            quantity: 1,
+          }),
+        },
+      });
+
+      alreadyPosted.add(deliveryContent);
+      posted += 1;
+    }
+  }
+
+  if (posted > 0) {
+    await tx.chat.update({
+      where: { id: chatId },
+      data: { updatedAt: new Date() },
+    });
+  }
+
+  return posted;
+}
+
 async function initializeChat(orderId) {
   let chat = await prisma.chat.findUnique({ where: { orderId } });
 
@@ -334,6 +420,7 @@ async function getChatStats() {
 module.exports = {
   sendSystemMessage,
   initializeChatForPaidOrder,
+  postDeliveredCodesToChat,
   initializeChat,
   closeChat,
   archiveChat,

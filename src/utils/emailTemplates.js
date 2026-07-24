@@ -126,18 +126,19 @@ function withEmailLayout(data = {}, templates = null) {
   };
 }
 
-function renderOrderItems(items) {
+function renderOrderItems(items, fallbackImageUrl = '') {
   if (!items?.length) return '';
 
   const rows = items.map((item) => {
     const name = escapeHtml(item.label);
     const qty = Number(item.quantity) || 1;
     const price = formatBrl(item.unitPrice * qty);
-    const image = item.imageUrl
-      ? `<img src="${escapeHtml(item.imageUrl)}" alt="" width="80" style="border-radius:8px;object-fit:contain;display:block;" />`
-      : '';
+    const src = item.imageUrl || fallbackImageUrl;
+    const image = src
+      ? `<img src="${escapeHtml(src)}" alt="" width="80" height="80" style="border-radius:8px;object-fit:cover;display:block;background:#f4f4f5;" />`
+      : `<div style="width:80px;height:80px;border-radius:8px;background:#f4f4f5;"></div>`;
     return `<tr>
-      ${image ? `<td style="width:100px;vertical-align:middle;padding:6px 10px 6px 0;">${image}</td>` : ''}
+      <td style="width:100px;vertical-align:middle;padding:6px 10px 6px 0;">${image}</td>
       <td style="vertical-align:middle;text-align:left;padding:6px 0;">
         <h3 style="margin:0;font-size:17px;color:#18181b;font-weight:600;">${name}</h3>
         <p style="margin:4px 0 0;font-size:18px;color:#A855F7;font-weight:700;">${price}</p>
@@ -194,7 +195,7 @@ function sharedLayoutFields(data, extras = {}) {
     storeUrl: data.storeUrl,
     customerName: data.customerName,
     orderId: data.orderId,
-    itemsHtml: extras.itemsHtml ?? (data.items ? renderOrderItems(data.items) : ''),
+    itemsHtml: extras.itemsHtml ?? (data.items ? renderOrderItems(data.items, data.logoUrl) : ''),
     totalLabel: extras.totalLabel ?? (data.total != null ? formatBrl(data.total) : ''),
     paymentExpiresLabel: extras.paymentExpiresLabel || '',
     copyPaste: extras.copyPaste || '',
@@ -324,6 +325,24 @@ function orderCancelledEmail(data) {
   };
 }
 
+function orderRefundedEmail(data) {
+  const reason = data.reason || 'Pedido reembolsado';
+  const vars = subjectVars(data);
+  return {
+    subject: resolveSubject(data, 'orderRefunded', vars),
+    html: layout({
+      ...sharedLayoutFields(data, { reason }),
+      title: 'Reembolso confirmado',
+      subtitle: reason,
+      bodyHtml: '',
+      ctaLabel: 'Ver pedido',
+      ctaUrl: data.orderUrl || data.storeUrl,
+      preheader: resolvePreheader(data, 'orderRefunded'),
+      customBodyHtml: resolveBodyTemplate(data, 'orderRefunded'),
+    }),
+  };
+}
+
 function abandonedCartRecoveryEmail(data) {
   const stepIndex = data.stepIndex || 1;
   const pixel = data.openPixelUrl
@@ -435,6 +454,7 @@ module.exports = {
   orderDeliveredEmail,
   reviewInviteEmail,
   orderCancelledEmail,
+  orderRefundedEmail,
   abandonedCartRecoveryEmail,
   abandonedProductRecoveryEmail,
   cancelledOrderRecoveryEmail,

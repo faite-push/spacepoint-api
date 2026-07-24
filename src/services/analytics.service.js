@@ -1,27 +1,12 @@
 const { prisma } = require('../config/prisma');
 const { sanitizeString } = require('../utils/sanitize');
 
-const TRACKED_PATH_PREFIXES = [
-  '/',
-  '/product',
-  '/category',
-  '/search',
-  '/checkout',
-  '/about',
-  '/privacy',
-  '/refunds',
-  '/login',
-  '/account',
-  '/maintenance',
-];
-
 function isTrackablePath(path) {
   const normalized = String(path || '').trim();
   if (!normalized || normalized.startsWith('/dashboard')) return false;
   if (normalized.startsWith('/api') || normalized.startsWith('/cdn')) return false;
-  return TRACKED_PATH_PREFIXES.some((prefix) =>
-    prefix === '/' ? normalized === '/' : normalized.startsWith(prefix)
-  );
+  // Aceita qualquer página da loja (alinha com o tracker do frontend)
+  return true;
 }
 
 function isStoreVisitTableMissing(error) {

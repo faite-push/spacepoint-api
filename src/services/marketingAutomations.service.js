@@ -11,6 +11,7 @@ const {
   PRODUCT_EMAIL_DELAY_OPTIONS,
   CANCELLED_ORDER_DELAY_OPTIONS,
   DEFAULT_ABANDONED_CART_SETTINGS,
+  MAX_RECOVERY_STEPS,
 } = require('../utils/abandonedCartSettings');
 const { countSentEmails } = require('../utils/recoverySequence');
 
@@ -149,11 +150,15 @@ async function getAutomationSettings() {
       cancelledOrderDelays: DEFAULT_ABANDONED_CART_SETTINGS.cancelledOrderDelays,
       notificationWindowStart: DEFAULT_ABANDONED_CART_SETTINGS.notificationWindowStart,
       notificationWindowEnd: DEFAULT_ABANDONED_CART_SETTINGS.notificationWindowEnd,
+      inactivityMinutes: DEFAULT_ABANDONED_CART_SETTINGS.inactivityMinutes,
+      minSubtotalCents: DEFAULT_ABANDONED_CART_SETTINGS.minSubtotalCents,
+      enabled: DEFAULT_ABANDONED_CART_SETTINGS.enabled,
     },
     options: {
       cartEmailDelays: CART_EMAIL_DELAY_OPTIONS,
       abandonedProductDelays: PRODUCT_EMAIL_DELAY_OPTIONS,
       cancelledOrderDelays: CANCELLED_ORDER_DELAY_OPTIONS,
+      maxRecoverySteps: MAX_RECOVERY_STEPS,
     },
   };
 }
@@ -840,6 +845,7 @@ async function createOrderFromAbandonedCart(cartId) {
   }
 
   const order = await prisma.$transaction(async (tx) => {
+    const { validateCouponForOrder } = require('./coupon.service');
     const sellables = [];
     const orderItemsData = [];
 
@@ -869,17 +875,35 @@ async function createOrderFromAbandonedCart(cartId) {
     const subtotal = orderItemsData.reduce((sum, row) => sum + row.unitPrice * row.quantity, 0);
     const paymentExpiresAt = new Date(Date.now() + ORDER_PAYMENT_TTL_MS);
 
+    let discountCents = 0;
+    let couponCode = null;
+    if (cart.couponCode) {
+      try {
+        const validated = await validateCouponForOrder(tx, {
+          code: cart.couponCode,
+          userId,
+          orderItems: orderItemsData,
+          subtotalCents: subtotal,
+          paymentMethod: 'PIX',
+        });
+        discountCents = validated.discountCents || 0;
+        couponCode = validated.coupon?.code || null;
+      } catch (err) {
+        console.warn('[createOrderFromAbandonedCart] cupom ignorado:', err.message);
+      }
+    }
+
     const created = await tx.order.create({
       data: {
         userId,
         subtotal,
-        discount: 0,
+        discount: discountCents,
         deliveryFee: 0,
         deliveryOption: 'standard',
-        total: subtotal,
+        total: Math.max(0, subtotal - discountCents),
         paymentExpiresAt,
         paymentMethod: 'PIX',
-        couponCode: cart.couponCode || null,
+        couponCode,
         checkoutData: {
           name: cart.customerName || cart.user?.name || '',
           email: cart.email || cart.user?.email || '',

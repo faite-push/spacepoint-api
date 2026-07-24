@@ -6,6 +6,7 @@ const CSRF_SKIP_EXACT = new Set([
   '/v2/api/admin/auth/login',
   '/v2/api/admin/auth/mfa/setup',
   '/v2/api/admin/auth/mfa/verify',
+  '/v2/api/analytics/visit',
 ]);
 
 const CSRF_SKIP_PREFIXES = [

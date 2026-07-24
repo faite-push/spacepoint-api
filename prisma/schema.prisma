@@ -258,6 +258,8 @@ model SiteConfig {
   footerPaddingTopDefault     Int      @default(48)
   footerCategoryColumnTitle   String?
   footerSupportColumnTitle    String?
+  footerMarketplaceColumnTitle String?
+  footerCompanyColumnTitle    String?
   socialFacebook              String?
   socialInstagram             String?
   socialTwitter               String?
@@ -266,6 +268,9 @@ model SiteConfig {
   socialLinks                 Json?
   footerCategoryLinks         Json?
   footerSupportLinks          Json?
+  footerMarketplaceLinks      Json?
+  footerCompanyLinks          Json?
+  footerBottomLinks           Json?
   footerLegalLinks            Json?
   topBarEnabled               Boolean  @default(false)
   topBarText                  String?
@@ -288,6 +293,9 @@ model SiteConfig {
   homeReviewsTotalCount       Int?
   homeReviewsGoogleMapsUrl    String?
   homeReviewsLinkLabel        String?
+  homeFamousEnabled           Boolean  @default(true)
+  homeFamousTitlePrimary      String?
+  homeFamousTitleSecondary    String?
   createdAt                   DateTime @default(now())
   updatedAt                   DateTime @updatedAt
   homeShowcaseEnabled         Boolean  @default(false)
@@ -317,6 +325,8 @@ model InstitutionalPage {
   slug            String   @unique
   title           String
   content         Json?
+  layoutType      String?
+  layoutData      Json?
   metaTitle       String?
   metaDescription String?
   isPublished     Boolean  @default(true)
@@ -348,6 +358,20 @@ model HomeReview {
   updatedAt   DateTime @updatedAt
 
   @@index([isPublished, sortOrder])
+}
+
+model FamousClient {
+  id        String   @id @default(cuid())
+  name      String
+  subtitle  String?
+  avatarUrl String?
+  videoUrl  String?
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive, sortOrder])
 }
 
 model HomeShowcaseSection {

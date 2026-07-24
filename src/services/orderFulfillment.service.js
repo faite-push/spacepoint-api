@@ -1,9 +1,10 @@
 const { prisma } = require('../config/prisma');
 const { resolveSellable } = require('../utils/productStore');
 const { syncAutomaticStockFromCodes } = require('../utils/digitalStock');
-const { initializeChatForPaidOrder } = require('./chat.service');
+const { initializeChatForPaidOrder, postDeliveredCodesToChat } = require('./chat.service');
 const orderEmailService = require('./orderEmail.service');
 const { finalizeOrderDelivery, emitDeliverySideEffects } = require('./orderDelivery.service');
+const { confirmCouponUsageForPaidOrder } = require('./coupon.service');
 
 const ORDER_PAYMENT_TTL_MS = 30 * 60 * 1000;
 
@@ -337,12 +338,14 @@ async function releaseOrderStock(tx, orderId) {
 
 /**
  * Marca pedido como pago, entrega itens digitais e registra pagamento.
+ * Se o pedido já foi CANCELLED (ex.: expiração) mas o gateway confirmou o pagamento,
+ * reabre e fulfilla quando `paymentMeta.recoverFromCancellation` é true.
  */
 async function fulfillPaidOrder(tx, orderId, paymentMeta = {}) {
   // Serializa webhooks/verificações concorrentes no mesmo pedido
   await tx.$executeRaw`SELECT 1 FROM "Order" WHERE id = ${orderId} FOR UPDATE`;
 
-  const current = await tx.order.findUnique({
+  let current = await tx.order.findUnique({
     where: { id: orderId },
     include: { items: true, payments: true },
   });
@@ -356,8 +359,62 @@ async function fulfillPaidOrder(tx, orderId, paymentMeta = {}) {
   }
 
   if (current.status === 'CANCELLED') {
-    throw new Error('Pedido cancelado não pode ser pago');
+    if (!paymentMeta.recoverFromCancellation) {
+      throw new Error('Pedido cancelado não pode ser pago');
+    }
+
+    const recoveryNote = 'Reaberto automaticamente após pagamento confirmado pelo gateway (estava cancelado/expirado).';
+    const prevNotes = String(current.adminNotes || '').trim();
+    await tx.order.update({
+      where: { id: current.id },
+      data: {
+        status: 'PENDING',
+        adminNotes: prevNotes.includes(recoveryNote)
+          ? prevNotes
+          : [prevNotes, recoveryNote].filter(Boolean).join('\n'),
+      },
+    });
+
+    // Estoque foi liberado no cancelamento — re-reserva o que for necessário
+    current = await tx.order.findUnique({
+      where: { id: orderId },
+      include: { items: true, payments: true },
+    });
+
+    for (const item of current.items) {
+      const sellable = await getSellableForItem(tx, item);
+      const deliveryType = sellable.variant?.deliveryType ?? sellable.product.deliveryType;
+      if (deliveryType === 'automatic_lines' || deliveryType === 'mixed') {
+        // deliverOrderItem busca AVAILABLE se não houver RESERVED
+        continue;
+      }
+      if ((item.stockReserved || 0) > 0) continue;
+      try {
+        await reserveStockForOrderItem(tx, item, item.id, sellable);
+      } catch (err) {
+        console.error('[fulfillPaidOrder] falha ao re-reservar estoque pós-cancelamento', {
+          orderId,
+          itemId: item.id,
+          message: err.message,
+        });
+        throw new Error(
+          'Pagamento confirmado, mas estoque insuficiente para reabrir o pedido. Intervenção manual necessária.'
+        );
+      }
+    }
+
+    current = await tx.order.findUnique({
+      where: { id: orderId },
+      include: { items: true, payments: true },
+    });
   }
+
+  if (current.status !== 'PENDING') {
+    throw new Error(`Pedido em status inválido para pagamento: ${current.status}`);
+  }
+
+  // Consome cupom no pagamento (não no PENDING)
+  await confirmCouponUsageForPaidOrder(tx, current);
 
   for (const item of current.items) {
     await deliverOrderItem(tx, item);
@@ -417,6 +474,7 @@ async function fulfillPaidOrder(tx, orderId, paymentMeta = {}) {
   try {
     const chat = await initializeChatForPaidOrder(tx, current.id);
     if (chat?.id) {
+      await postDeliveredCodesToChat(tx, chat.id, current.id);
       updatedOrder._wsChatId = chat.id;
       updatedOrder._wsUserId = current.userId;
     }
@@ -465,22 +523,36 @@ function notifyOrderChatCreated(order) {
 }
 
 async function cancelOrder(tx, orderId, reason = 'cancelled') {
+  await tx.$executeRaw`SELECT 1 FROM "Order" WHERE id = ${orderId} FOR UPDATE`;
+
   const current = await tx.order.findUnique({ where: { id: orderId } });
   if (!current) throw new Error('Pedido não encontrado');
   if (['PAID', 'DELIVERED'].includes(current.status)) {
     throw new Error('Pedido pago não pode ser cancelado');
   }
+  if (current.status !== 'PENDING') {
+    return current;
+  }
 
   await releaseOrderStock(tx, orderId);
+  const { releaseCouponUsage } = require('./coupon.service');
+  await releaseCouponUsage(tx, orderId);
+
   await tx.payment.updateMany({
     where: { orderId, status: 'PENDING' },
     data: { status: 'CANCELLED' },
   });
 
-  return tx.order.update({
-    where: { id: orderId },
+  const updated = await tx.order.updateMany({
+    where: { id: orderId, status: 'PENDING' },
     data: { status: 'CANCELLED', adminNotes: reason },
   });
+
+  if (updated.count === 0) {
+    throw new Error('Pedido não está mais pendente');
+  }
+
+  return tx.order.findUnique({ where: { id: orderId } });
 }
 
 async function expireStalePendingOrders() {

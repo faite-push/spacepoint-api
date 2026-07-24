@@ -8,9 +8,11 @@ const {
   orderDeliveredEmail,
   reviewInviteEmail,
   orderCancelledEmail,
+  orderRefundedEmail,
   withEmailLayout,
 } = require('../utils/emailTemplates');
 const { getEmailTemplates } = require('../utils/emailTemplatesSettings');
+const { resolveMediaUrl } = require('../utils/mediaUrl');
 
 const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
 
@@ -40,6 +42,34 @@ function buildStoreUrl() {
   return FRONTEND_URL;
 }
 
+function getCheckoutDataFlags(order) {
+  return order?.checkoutData && typeof order.checkoutData === 'object'
+    ? { ...order.checkoutData }
+    : {};
+}
+
+async function claimOrderEmailFlag(orderId, flagKey) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { id: true, checkoutData: true },
+  });
+  if (!order) return false;
+  const data = getCheckoutDataFlags(order);
+  if (data[flagKey]) return false;
+
+  await prisma.order.update({
+    where: { id: orderId },
+    data: {
+      checkoutData: {
+        ...data,
+        [flagKey]: true,
+        [`${flagKey}At`]: new Date().toISOString(),
+      },
+    },
+  });
+  return true;
+}
+
 async function loadSiteBranding() {
   const { templates, branding } = await getEmailTemplates(prisma);
   return {
@@ -63,8 +93,8 @@ async function loadOrderContext(orderId) {
       user: { select: { name: true, email: true } },
       items: {
         include: {
-          product: { select: { name: true } },
-          variant: { select: { name: true } },
+          product: { select: { name: true, imageUrl: true } },
+          variant: { select: { name: true, imageUrl: true } },
         },
       },
     },
@@ -83,6 +113,9 @@ async function loadOrderContext(orderId) {
         : item.product.name,
     quantity: item.quantity,
     unitPrice: item.unitPrice,
+    imageUrl: resolveMediaUrl(
+      item.variant?.imageUrl || item.product?.imageUrl || null
+    ),
   }));
 
   return withEmailLayout({
@@ -136,7 +169,7 @@ function layoutFields(ctx) {
 
 async function sendToCustomer(email, subject, html) {
   if (!isValidEmail(email)) {
-    console.warn('[orderEmail] E-mail inválido, envio ignorado:', email);
+    console.warn('[orderEmail] E-mail inválido, envio ignorado');
     return false;
   }
   return emailService.sendEmail(email, subject, html);
@@ -229,7 +262,8 @@ function notifyPaymentConfirmed(orderId) {
       ? { ...paidPayment.metadata }
       : {};
 
-    if (metadata.emailPaymentConfirmedSent) return;
+    const orderFlags = getCheckoutDataFlags(ctx.order);
+    if (metadata.emailPaymentConfirmedSent || orderFlags.emailPaymentConfirmedSent) return;
 
     const template = paymentConfirmedEmail({
       storeName: ctx.storeName,
@@ -257,6 +291,8 @@ function notifyPaymentConfirmed(orderId) {
           },
         },
       });
+    } else {
+      await claimOrderEmailFlag(orderId, 'emailPaymentConfirmedSent');
     }
   });
 }
@@ -361,6 +397,7 @@ function notifyOrderCancelled(orderId, { reason = 'Pedido cancelado', expired = 
   queueEmail('notifyOrderCancelled', async () => {
     const ctx = await loadOrderContext(orderId);
     if (!ctx || ctx.order.status !== 'CANCELLED') return;
+    if (getCheckoutDataFlags(ctx.order).emailCancelledSent) return;
 
     const template = orderCancelledEmail({
       storeName: ctx.storeName,
@@ -372,7 +409,31 @@ function notifyOrderCancelled(orderId, { reason = 'Pedido cancelado', expired = 
       ...layoutFields(ctx),
     });
 
-    await sendToCustomer(ctx.customerEmail, template.subject, template.html);
+    const sent = await sendToCustomer(ctx.customerEmail, template.subject, template.html);
+    if (!sent) return;
+    await claimOrderEmailFlag(orderId, 'emailCancelledSent');
+  });
+}
+
+function notifyOrderRefunded(orderId, { reason = 'Pedido reembolsado' } = {}) {
+  queueEmail('notifyOrderRefunded', async () => {
+    const ctx = await loadOrderContext(orderId);
+    if (!ctx || ctx.order.status !== 'REFUNDED') return;
+    if (getCheckoutDataFlags(ctx.order).emailRefundedSent) return;
+
+    const template = orderRefundedEmail({
+      storeName: ctx.storeName,
+      customerName: ctx.customerName,
+      orderId: ctx.orderId,
+      reason,
+      orderUrl: ctx.orderUrl,
+      storeUrl: ctx.storeUrl,
+      ...layoutFields(ctx),
+    });
+
+    const sent = await sendToCustomer(ctx.customerEmail, template.subject, template.html);
+    if (!sent) return;
+    await claimOrderEmailFlag(orderId, 'emailRefundedSent');
   });
 }
 
@@ -384,4 +445,5 @@ module.exports = {
   notifyReviewInvite,
   notifyReviewReminder,
   notifyOrderCancelled,
+  notifyOrderRefunded,
 };
