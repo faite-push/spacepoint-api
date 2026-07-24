@@ -1,22 +1,22 @@
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 const CERTS_DIR = path.join(__dirname, '..', 'certs');
 const DEFAULT_PEM_PATH = path.join(CERTS_DIR, 'certificate.pem');
 const DEFAULT_P12_PATH = path.join(CERTS_DIR, 'client.p12');
+const DEFAULT_KEY_PATH = path.join(CERTS_DIR, 'client.key');
+const DEFAULT_CERT_PATH = path.join(CERTS_DIR, 'client.crt');
 
 /**
- * SquareCloud Postgres exige TLS. Este módulo materializa o certificado
- * (arquivo ou env) e injeta os parâmetros SSL na DATABASE_URL antes do Prisma.
+ * SquareCloud Postgres + Prisma: preferir PKCS#12 (sslidentity).
+ * Gera client.p12 a partir do PEM via openssl quando disponível.
  *
- * Env suportadas:
- * - DATABASE_URL                  URL base (sem ou com params SSL)
- * - DATABASE_SSL_CERT             Conteúdo PEM (texto completo)
- * - DATABASE_SSL_CERT_BASE64      PEM em base64 (retorno da API Square)
- * - DATABASE_SSL_CERT_PATH        Caminho para certificate.pem já no disco
- * - DATABASE_SSL_P12_PATH         Caminho para client.p12 (preferido pelo Prisma)
- * - DATABASE_SSL_P12_PASSWORD     Senha do .p12 (padrão: squarecloud)
- * - DATABASE_SSL_MODE             verify-ca | require | verify-full (padrão: verify-ca)
+ * Env:
+ * - DATABASE_URL
+ * - DATABASE_SSL_CERT / DATABASE_SSL_CERT_BASE64 / DATABASE_SSL_CERT_PATH
+ * - DATABASE_SSL_P12_PATH / DATABASE_SSL_P12_PASSWORD
+ * - DATABASE_SSL_MODE (require | no-verify | verify-ca | verify-full)
  */
 
 function ensureDir(dir) {
@@ -24,7 +24,6 @@ function ensureDir(dir) {
 }
 
 function pathForUrl(filePath) {
-  // libpq/Prisma aceitam caminho absoluto; normaliza separadores
   return path.resolve(filePath).replace(/\\/g, '/');
 }
 
@@ -33,34 +32,34 @@ function decodeCertContent() {
   if (raw && String(raw).trim()) {
     return String(raw).replace(/\\n/g, '\n').trim();
   }
-
   const b64 = process.env.DATABASE_SSL_CERT_BASE64;
   if (b64 && String(b64).trim()) {
     return Buffer.from(String(b64).trim(), 'base64').toString('utf8').trim();
   }
-
   return null;
 }
 
 function splitPemBundles(pemContent, outDir) {
   ensureDir(outDir);
-  const keyMatch = pemContent.match(/-----BEGIN ([A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----)/);
+  const keyMatch = pemContent.match(
+    /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/
+  );
   const certMatches = [...pemContent.matchAll(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g)];
 
-  const keyPath = path.join(outDir, 'client.key');
-  const certPath = path.join(outDir, 'client.crt');
-
   if (keyMatch) {
-    fs.writeFileSync(keyPath, `${keyMatch[0].trim()}\n`, 'utf8');
+    fs.writeFileSync(DEFAULT_KEY_PATH, `${keyMatch[0].trim()}\n`, 'utf8');
   }
   if (certMatches.length) {
-    // Primeiro cert = client; se houver mais, o último costuma ser CA — grava todos no .crt
-    fs.writeFileSync(certPath, `${certMatches.map((m) => m[0].trim()).join('\n')}\n`, 'utf8');
+    fs.writeFileSync(
+      DEFAULT_CERT_PATH,
+      `${certMatches.map((m) => m[0].trim()).join('\n')}\n`,
+      'utf8'
+    );
   }
 
   return {
-    keyPath: fs.existsSync(keyPath) ? keyPath : null,
-    certPath: fs.existsSync(certPath) ? certPath : null,
+    keyPath: fs.existsSync(DEFAULT_KEY_PATH) ? DEFAULT_KEY_PATH : null,
+    certPath: fs.existsSync(DEFAULT_CERT_PATH) ? DEFAULT_CERT_PATH : null,
   };
 }
 
@@ -83,95 +82,163 @@ function resolvePemPath() {
   return null;
 }
 
-function resolveP12Path() {
+function tryCreateP12(keyPath, certPath) {
+  if (!keyPath || !certPath) return null;
+  if (fs.existsSync(DEFAULT_P12_PATH)) return DEFAULT_P12_PATH;
+
+  const password = process.env.DATABASE_SSL_P12_PASSWORD || 'squarecloud';
+  ensureDir(CERTS_DIR);
+
+  const result = spawnSync(
+    'openssl',
+    [
+      'pkcs12',
+      '-export',
+      '-out',
+      DEFAULT_P12_PATH,
+      '-inkey',
+      keyPath,
+      '-in',
+      certPath,
+      '-passout',
+      `pass:${password}`,
+    ],
+    { encoding: 'utf8' }
+  );
+
+  if (result.status === 0 && fs.existsSync(DEFAULT_P12_PATH)) {
+    console.log('[databaseSsl] client.p12 gerado via openssl');
+    return DEFAULT_P12_PATH;
+  }
+
+  const err = (result.stderr || result.error || '').toString().trim();
+  if (err) console.warn('[databaseSsl] openssl p12:', err.slice(0, 200));
+  return null;
+}
+
+function resolveP12Path(keyPath, certPath) {
   const fromEnv = process.env.DATABASE_SSL_P12_PATH;
   if (fromEnv && fs.existsSync(fromEnv)) return path.resolve(fromEnv);
-  if (fs.existsSync(DEFAULT_P12_PATH)) return DEFAULT_P12_PATH;
+
   const rootP12 = path.join(process.cwd(), 'client.p12');
   if (fs.existsSync(rootP12)) return rootP12;
-  return null;
+  if (fs.existsSync(DEFAULT_P12_PATH)) return DEFAULT_P12_PATH;
+
+  return tryCreateP12(keyPath, certPath);
+}
+
+function stripSslParams(databaseUrl) {
+  const url = new URL(databaseUrl);
+  for (const key of [
+    'sslmode',
+    'sslcert',
+    'sslkey',
+    'sslrootcert',
+    'sslidentity',
+    'sslpassword',
+  ]) {
+    url.searchParams.delete(key);
+  }
+  return url.toString();
 }
 
 function appendQueryParams(databaseUrl, params) {
   const url = new URL(databaseUrl);
   for (const [key, value] of Object.entries(params)) {
     if (value == null || value === '') continue;
-    if (!url.searchParams.has(key)) {
-      url.searchParams.set(key, value);
-    }
+    url.searchParams.set(key, value);
   }
   return url.toString();
 }
 
+function sanitizeUrlForLog(databaseUrl) {
+  try {
+    const u = new URL(databaseUrl);
+    if (u.password) u.password = '***';
+    return u.toString();
+  } catch {
+    return '(url inválida)';
+  }
+}
+
 /**
  * Aplica SSL na process.env.DATABASE_URL. Idempotente.
- * @returns {{ url: string, mode: 'p12'|'pem'|'none' }}
  */
 function applyDatabaseSsl() {
-  const baseUrl = process.env.DATABASE_URL;
+  let baseUrl = process.env.DATABASE_URL;
   if (!baseUrl) {
     return { url: '', mode: 'none' };
   }
 
-  // Já configurado manualmente
-  if (
-    baseUrl.includes('sslidentity=') ||
-    baseUrl.includes('sslrootcert=') ||
-    baseUrl.includes('sslcert=')
-  ) {
-    return { url: baseUrl, mode: baseUrl.includes('sslidentity=') ? 'p12' : 'pem' };
+  // Reaplica do zero para preferir p12 quando possível
+  baseUrl = stripSslParams(baseUrl);
+
+  // Garante path do database (Square costuma usar /squarecloud)
+  try {
+    const u = new URL(baseUrl);
+    if (!u.pathname || u.pathname === '/') {
+      u.pathname = '/squarecloud';
+      baseUrl = u.toString();
+    }
+  } catch {
+    /* ignore */
   }
 
-  const sslMode = process.env.DATABASE_SSL_MODE || 'require';
-  const p12Path = resolveP12Path();
+  const sslMode = process.env.DATABASE_SSL_MODE || 'no-verify';
 
+  const pemPath = resolvePemPath();
+  let keyPath = null;
+  let certPath = null;
+  if (pemPath) {
+    const pemContent = fs.readFileSync(pemPath, 'utf8');
+    ({ keyPath, certPath } = splitPemBundles(pemContent, CERTS_DIR));
+  }
+
+  const p12Path = resolveP12Path(keyPath, certPath);
   if (p12Path) {
     const password = process.env.DATABASE_SSL_P12_PASSWORD || 'squarecloud';
     const url = appendQueryParams(baseUrl, {
       sslmode: sslMode,
       sslidentity: pathForUrl(p12Path),
       sslpassword: password,
+      schema: 'public',
     });
     process.env.DATABASE_URL = url;
     return { url, mode: 'p12' };
   }
 
-  const pemPath = resolvePemPath();
   if (pemPath) {
-    const pemContent = fs.readFileSync(pemPath, 'utf8');
-    const { keyPath, certPath } = splitPemBundles(pemContent, CERTS_DIR);
-
-    // Arquivos separados evitam erro ASN1 no Prisma/Windows ao reusar o mesmo .pem
     const key = pathForUrl(keyPath || pemPath);
     const cert = pathForUrl(certPath || pemPath);
     const params = {
       sslmode: sslMode,
       sslcert: cert,
       sslkey: key,
+      schema: 'public',
     };
-    // verify-ca / verify-full precisam de CA; com bundle único use o cert
     if (sslMode === 'verify-ca' || sslMode === 'verify-full') {
       params.sslrootcert = cert;
     }
-
     const url = appendQueryParams(baseUrl, params);
     process.env.DATABASE_URL = url;
     return { url, mode: 'pem' };
   }
 
+  process.env.DATABASE_URL = baseUrl;
   return { url: baseUrl, mode: 'none' };
 }
 
-// Auto-aplica ao ser carregado via `node -r`
 const applied = applyDatabaseSsl();
 if (process.env.NODE_ENV !== 'test' && applied.mode !== 'none') {
   console.log(`[databaseSsl] TLS ativo (${applied.mode})`);
+  console.log(`[databaseSsl] ${sanitizeUrlForLog(applied.url)}`);
 }
 
 module.exports = {
   applyDatabaseSsl,
   resolvePemPath,
   resolveP12Path,
+  sanitizeUrlForLog,
   CERTS_DIR,
   DEFAULT_PEM_PATH,
   DEFAULT_P12_PATH,
